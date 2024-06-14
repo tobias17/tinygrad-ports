@@ -1,7 +1,7 @@
 from tinygrad.tensor import Tensor
-from tinygrad.nn import Linear, Conv2d
+from tinygrad.nn import Linear, Conv2d, GroupNorm
 from tinygrad.nn.state import safe_load
-from typing import Dict, List, Union, Callable
+from typing import Dict, List, Union, Callable, Optional
 import os
 
 # configs:
@@ -20,6 +20,31 @@ configs: Dict = {
       "first_stage_model": {},
    }
 }
+
+class ResBlock:
+   def __init__(self, in_channels:int, emb_channels:int, out_channels:Optional[int]=None):
+      self.in_layers = [
+         GroupNorm(32, in_channels),
+         Tensor.silu,
+         Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+      ]
+      self.emb_layers = [
+         Tensor.silu,
+         Linear(emb_channels, out_channels),
+      ]
+      self.out_layers = [
+         GroupNorm(32, in_channels),
+         Tensor.silu,
+         # dropout ignored
+         Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+      ]
+      self.skip_connection = Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else lambda x: x
+
+   def __call__(self, x:Tensor, emb:Tensor) -> Tensor:
+      h = x.sequential(self.in_layers)
+      emb_out = emb.sequential(self.emb_layers)
+      h = (h + emb_out).sequential(self.out_layers)
+      return self.skip_connection(x) + h
 
 # https://github.com/Stability-AI/generative-models/blob/059d8e9cd9c55aea1ef2ece39abf605efb8b7cc9/sgm/modules/diffusionmodules/openaimodel.py#L472
 class UNetModel:
@@ -61,8 +86,9 @@ class UNetModel:
       for idx, mult in enumerate(channel_mult):
          for nr in range(self.num_res_blocks[idx]):
             layers = [
-               
+               ResBlock(ch, time_embed_dim, model_channels*mult),
             ]
+            ch = mult * model_channels
 
    def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
       time_emb = timestep_embedding(tms, self.model_channels)
