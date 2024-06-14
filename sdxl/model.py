@@ -3,9 +3,9 @@
 # tinygrad/tinygrad              | MIT     | https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/LICENSE)
 # Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE)
 
-from tinygrad.tensor import Tensor
-from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm
-from tinygrad.nn.state import safe_load
+from tinygrad.tensor import Tensor # type: ignore
+from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
+from tinygrad.nn.state import safe_load # type: ignore
 from typing import Dict, List, Union, Callable, Optional
 import os
 
@@ -15,12 +15,12 @@ import os
 
 configs: Dict = {
    "SDXL_Base": {
-      "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "head_dim": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
+      "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
       "conditioner": {},
       "first_stage_model": {},
    },
    "SDXL_Refiner": {
-      "model": {"adm_in_channels": 2560, "in_channels": 4, "out_channels": 4, "model_channels": 384, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4, 4], "head_dim": 64, "transformer_depth": [4, 4, 4, 4], "ctx_dim": [1280, 1280, 1280, 1280]},
+      "model": {"adm_in_channels": 2560, "in_channels": 4, "out_channels": 4, "model_channels": 384, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4, 4], "d_head": 64, "transformer_depth": [4, 4, 4, 4], "ctx_dim": [1280, 1280, 1280, 1280]},
       "conditioner": {},
       "first_stage_model": {},
    }
@@ -86,7 +86,7 @@ class FeedForward:
    def __init__(self, dim:int, mult:int=4):
       self.net = [
          GEGLU(dim, dim*mult),
-         # lambda x: x,  # needed for weights loading code to work
+         lambda x: x,  # needed for weights loading code to work
          Linear(dim*mult, dim)
       ]
 
@@ -95,7 +95,7 @@ class FeedForward:
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L200
 class BasicTransformerBlock:
-   def __init__(self, dim, ctx_dim, n_heads, d_head):
+   def __init__(self, dim:int, ctx_dim:int, n_heads:int, d_head:int):
       self.attn1 = CrossAttention(dim, dim, n_heads, d_head)
       self.ff = FeedForward(dim)
       self.attn2 = CrossAttention(dim, ctx_dim, n_heads, d_head)
@@ -110,29 +110,52 @@ class BasicTransformerBlock:
       return x
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L215
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/attention.py#L619
 class SpatialTransformer:
-   def __init__(self, channels:int, ctx_dim:int, n_heads:int, d_head:int):
+   def __init__(self, channels:int, n_heads:int, d_head:int, ctx_dim:Union[int,List[int]], depth:int=1):
+      if isinstance(ctx_dim, int):
+         ctx_dim = [ctx_dim]*depth
+      else:
+         assert isinstance(ctx_dim, list) and depth == len(ctx_dim)
       self.norm = GroupNorm(32, channels)
       assert channels == n_heads * d_head
-      self.proj_in = Conv2d(channels, n_heads * d_head, 1)
-      self.transformer_blocks = [BasicTransformerBlock(channels, ctx_dim, n_heads, d_head)]
-      self.proj_out = Conv2d(n_heads * d_head, channels, 1)
+      self.proj_in = Linear(channels, n_heads * d_head)
+      self.transformer_blocks = [BasicTransformerBlock(channels, ctx_dim[d], n_heads, d_head) for d in range(depth)]
+      self.proj_out = Linear(n_heads * d_head, channels)
 
    def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
       b, c, h, w = x.shape
       x_in = x
       x = self.norm(x)
-      x = self.proj_in(x)
       x = x.reshape(b, c, h*w).permute(0,2,1)
+      x = self.proj_in(x)
       for block in self.transformer_blocks:
          x = block(x, context=context)
+      x = self.proj_out(x)
       x = x.permute(0,2,1).reshape(b, c, h, w)
-      ret = self.proj_out(x) + x_in
-      return ret
+      return x + x_in
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L235
+class Downsample:
+   def __init__(self, channels:int):
+      self.op = Conv2d(channels, channels, 3, stride=2, padding=1)
+
+   def __call__(self, x:Tensor) -> Tensor:
+      return self.op(x)
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L242
+class Upsample:
+   def __init__(self, channels:int):
+      self.conv = Conv2d(channels, channels, 3, padding=1)
+
+   def __call__(self, x:Tensor) -> Tensor:
+      bs,c,py,px = x.shape
+      x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
+      return self.conv(x)
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
 class UNetModel:
-   def __init__(self, adm_in_channels:int, in_channels:int, out_channels:int, model_channels:int, attention_resolutions:List[int], num_res_blocks:int, channel_mult:List[int], head_dim:int, transformer_depth:List[int], ctx_dim:Union[int,List[int]]):
+   def __init__(self, adm_in_channels:int, in_channels:int, out_channels:int, model_channels:int, attention_resolutions:List[int], num_res_blocks:int, channel_mult:List[int], d_head:int, transformer_depth:List[int], ctx_dim:Union[int,List[int]]):
       self.in_channels = in_channels
       self.model_channels = model_channels
       self.out_channels = out_channels
@@ -144,7 +167,7 @@ class UNetModel:
       self.conv_resample = True
       self.num_classes = None
       self.use_checkpoint = False
-      self.head_dim = head_dim
+      self.d_head = d_head
 
       time_embed_dim = model_channels * 4
       self.time_embed = [
@@ -160,20 +183,29 @@ class UNetModel:
       ]
 
       self.input_blocks = [
-         Conv2d(in_channels, model_channels, 3, padding=1)
+         [Conv2d(in_channels, model_channels, 3, padding=1)]
       ]
       input_block_channels = [model_channels]
       ch = model_channels
       ds = 1
       for idx, mult in enumerate(channel_mult):
          for nr in range(self.num_res_blocks[idx]):
-            layers = [
+            layers: List[Callable[[Tensor,Tensor],Tensor]] = [
                ResBlock(ch, time_embed_dim, model_channels*mult),
             ]
             ch = mult * model_channels
             if ds in attention_resolutions:
-               num_heads = ch // head_dim
-               layers.append(SpatialTransformer(ch, num_heads, head_dim, depth=transformer_depth[idx], ctx_dim=ctx_dim))
+               n_heads = ch // d_head
+               layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
+            
+            self.input_blocks.append(layers)
+            input_block_channels.append(ch)
+         
+         if idx != len(channel_mult) - 1:
+            out_ch = ch
+            self.input_blocks.append([
+               Downsample()
+            ])
 
 
    def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
