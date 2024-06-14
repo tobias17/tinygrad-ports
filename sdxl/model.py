@@ -6,8 +6,8 @@
 from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
 from tinygrad.nn.state import safe_load # type: ignore
-from typing import Dict, List, Union, Callable, Optional
-import os
+from typing import Dict, List, Union, Callable, Optional, Any
+import os, math
 
 # configs:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
@@ -153,7 +153,15 @@ class Upsample:
       x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
       return self.conv(x)
 
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L251
+def timestep_embedding(timesteps, dim, max_period=10000):
+   half = dim // 2
+   freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
+   args = timesteps * freqs
+   return Tensor.cat(args.cos(), args.sin()).reshape(1, -1)
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L257
 class UNetModel:
    def __init__(self, adm_in_channels:int, in_channels:int, out_channels:int, model_channels:int, attention_resolutions:List[int], num_res_blocks:int, channel_mult:List[int], d_head:int, transformer_depth:List[int], ctx_dim:Union[int,List[int]]):
       self.in_channels = in_channels
@@ -189,8 +197,8 @@ class UNetModel:
       ch = model_channels
       ds = 1
       for idx, mult in enumerate(channel_mult):
-         for nr in range(self.num_res_blocks[idx]):
-            layers: List[Callable[[Tensor,Tensor],Tensor]] = [
+         for _ in range(self.num_res_blocks[idx]):
+            layers: List[Any] = [
                ResBlock(ch, time_embed_dim, model_channels*mult),
             ]
             ch = mult * model_channels
@@ -202,15 +210,62 @@ class UNetModel:
             input_block_channels.append(ch)
          
          if idx != len(channel_mult) - 1:
-            out_ch = ch
             self.input_blocks.append([
-               Downsample()
+               Downsample(ch),
             ])
+            ds *= 2
+      
+      n_heads = ch // d_head
+      self.middle_block: List = [
+         ResBlock(ch, time_embed_dim, ch),
+         SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[-1]),
+         ResBlock(ch, time_embed_dim, ch),
+      ]
 
+      self.output_blocks = []
+      for idx, mult in list(enumerate(channel_mult))[::-1]:
+         for i in range(self.num_res_blocks[idx] + 1):
+            ich = input_block_channels.pop()
+            layers = [
+               ResBlock(ch + ich, time_embed_dim, model_channels*mult),
+            ]
+            
+            if ds in attention_resolutions:
+               n_heads = ch // d_head
+               layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
+            
+            if idx > 0 and i == self.num_res_blocks[idx]:
+               layers.append(Upsample(ch))
+            self.output_blocks.append(layers)
+
+      self.out = [
+         GroupNorm(32, ch),
+         Tensor.silu,
+         Conv2d(self.out_channels, self.out_channels, 3, padding=1),
+      ]
 
    def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
-      time_emb = timestep_embedding(tms, self.model_channels)
-      return x
+      t_emb = timestep_embedding(tms, self.model_channels)
+      emb = t_emb.sequential(self.time_embed)
+
+      def run(x:Tensor, bb) -> Tensor:
+         if isinstance(bb, ResBlock): x = bb(x, emb)
+         elif isinstance(bb, SpatialTransformer): x = bb(x, ctx)
+         else: x = bb(x)
+         return x
+
+      saved_inputs = []
+      for b in self.input_blocks:
+         for bb in b:
+            x = run(x, bb)
+         saved_inputs.append(x)
+      for bb in self.middle_block:
+         x = run(x, bb)
+      for b in self.output_blocks:
+         x = x.cat(saved_inputs.pop(), dim=1)
+         for bb in b:
+            x = run(x, bb)
+      return x.sequential(self.out)
 
 class Conditioner:
    pass
