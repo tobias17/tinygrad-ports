@@ -8,7 +8,7 @@ from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from typing import Dict, List, Union, Callable, Optional, Any
+from typing import Dict, List, Union, Callable, Optional, Any, OrderedDict
 from functools import lru_cache
 import os, math, re, gzip
 
@@ -19,149 +19,154 @@ configs: Dict = {
    "SDXL_Base": {
       "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
       "conditioner": {},
-      "first_stage_model": {},
+      "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
    },
    "SDXL_Refiner": {
       "model": {"adm_in_channels": 2560, "in_channels": 4, "out_channels": 4, "model_channels": 384, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4, 4], "d_head": 64, "transformer_depth": [4, 4, 4, 4], "ctx_dim": [1280, 1280, 1280, 1280]},
       "conditioner": {},
-      "first_stage_model": {},
+      "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
    }
 }
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L136
-class ResBlock:
-   def __init__(self, channels:int, emb_channels:int, out_channels:int):
-      self.in_layers = [
-         GroupNorm(32, channels),
-         Tensor.silu,
-         Conv2d(channels, out_channels, 3, padding=1),
-      ]
-      self.emb_layers = [
-         Tensor.silu,
-         Linear(emb_channels, out_channels),
-      ]
-      self.out_layers = [
-         GroupNorm(32, out_channels),
-         Tensor.silu,
-         lambda x: x,  # needed for weights loading code to work
-         Conv2d(out_channels, out_channels, 3, padding=1),
-      ]
-      self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else lambda x: x
+class UNet:
+   """
+   Namespace for UNet model components.
+   """
 
-   def __call__(self, x:Tensor, emb:Tensor) -> Tensor:
-      h = x.sequential(self.in_layers)
-      emb_out = emb.sequential(self.emb_layers)
-      h = h + emb_out.reshape(*emb_out.shape, 1, 1)
-      h = h.sequential(self.out_layers)
-      return self.skip_connection(x) + h
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L136
+   class ResBlock:
+      def __init__(self, channels:int, emb_channels:int, out_channels:int):
+         self.in_layers = [
+            GroupNorm(32, channels),
+            Tensor.silu,
+            Conv2d(channels, out_channels, 3, padding=1),
+         ]
+         self.emb_layers = [
+            Tensor.silu,
+            Linear(emb_channels, out_channels),
+         ]
+         self.out_layers = [
+            GroupNorm(32, out_channels),
+            Tensor.silu,
+            lambda x: x,  # needed for weights loading code to work
+            Conv2d(out_channels, out_channels, 3, padding=1),
+         ]
+         self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else lambda x: x
 
-
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L163
-class CrossAttention:
-   def __init__(self, query_dim, context_dim, n_heads, d_head):
-      self.to_q = Linear(query_dim, n_heads*d_head, bias=False)
-      self.to_k = Linear(context_dim, n_heads*d_head, bias=False)
-      self.to_v = Linear(context_dim, n_heads*d_head, bias=False)
-      self.num_heads = n_heads
-      self.head_size = d_head
-      self.to_out = [Linear(n_heads*d_head, query_dim)]
-
-   def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
-      ctx = x if ctx is None else ctx
-      q,k,v = self.to_q(x), self.to_k(ctx), self.to_v(ctx)
-      q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
-      attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
-      h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
-      return h_.sequential(self.to_out)
+      def __call__(self, x:Tensor, emb:Tensor) -> Tensor:
+         h = x.sequential(self.in_layers)
+         emb_out = emb.sequential(self.emb_layers)
+         h = h + emb_out.reshape(*emb_out.shape, 1, 1)
+         h = h.sequential(self.out_layers)
+         return self.skip_connection(x) + h
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L180
-class GEGLU:
-   def __init__(self, dim_in:int, dim_out:int):
-      self.proj = Linear(dim_in, dim_out * 2)
-      self.dim_out = dim_out
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L163
+   class CrossAttention:
+      def __init__(self, query_dim, context_dim, n_heads, d_head):
+         self.to_q = Linear(query_dim, n_heads*d_head, bias=False)
+         self.to_k = Linear(context_dim, n_heads*d_head, bias=False)
+         self.to_v = Linear(context_dim, n_heads*d_head, bias=False)
+         self.num_heads = n_heads
+         self.head_size = d_head
+         self.to_out = [Linear(n_heads*d_head, query_dim)]
 
-   def __call__(self, x:Tensor) -> Tensor:
-      x, gate = self.proj(x).chunk(2, dim=-1)
-      return x * gate.gelu()
-
-
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L189
-class FeedForward:
-   def __init__(self, dim:int, mult:int=4):
-      self.net = [
-         GEGLU(dim, dim*mult),
-         lambda x: x,  # needed for weights loading code to work
-         Linear(dim*mult, dim)
-      ]
-
-   def __call__(self, x:Tensor) -> Tensor:
-      return x.sequential(self.net)
+      def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
+         ctx = x if ctx is None else ctx
+         q,k,v = self.to_q(x), self.to_k(ctx), self.to_v(ctx)
+         q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
+         attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
+         h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
+         return h_.sequential(self.to_out)
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L200
-class BasicTransformerBlock:
-   def __init__(self, dim:int, ctx_dim:int, n_heads:int, d_head:int):
-      self.attn1 = CrossAttention(dim, dim, n_heads, d_head)
-      self.ff = FeedForward(dim)
-      self.attn2 = CrossAttention(dim, ctx_dim, n_heads, d_head)
-      self.norm1 = LayerNorm(dim)
-      self.norm2 = LayerNorm(dim)
-      self.norm3 = LayerNorm(dim)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L180
+   class GEGLU:
+      def __init__(self, dim_in:int, dim_out:int):
+         self.proj = Linear(dim_in, dim_out * 2)
+         self.dim_out = dim_out
 
-   def __call__(self, x, context=None):
-      x = self.attn1(self.norm1(x)) + x
-      x = self.attn2(self.norm2(x), context=context) + x
-      x = self.ff(self.norm3(x)) + x
-      return x
+      def __call__(self, x:Tensor) -> Tensor:
+         x, gate = self.proj(x).chunk(2, dim=-1)
+         return x * gate.gelu()
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L215
-# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/attention.py#L619
-class SpatialTransformer:
-   def __init__(self, channels:int, n_heads:int, d_head:int, ctx_dim:Union[int,List[int]], depth:int=1):
-      if isinstance(ctx_dim, int):
-         ctx_dim = [ctx_dim]*depth
-      else:
-         assert isinstance(ctx_dim, list) and depth == len(ctx_dim)
-      self.norm = GroupNorm(32, channels)
-      assert channels == n_heads * d_head
-      self.proj_in = Linear(channels, n_heads * d_head)
-      self.transformer_blocks = [BasicTransformerBlock(channels, ctx_dim[d], n_heads, d_head) for d in range(depth)]
-      self.proj_out = Linear(n_heads * d_head, channels)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L189
+   class FeedForward:
+      def __init__(self, dim:int, mult:int=4):
+         self.net = [
+            UNet.GEGLU(dim, dim*mult),
+            lambda x: x,  # needed for weights loading code to work
+            Linear(dim*mult, dim)
+         ]
 
-   def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
-      b, c, h, w = x.shape
-      x_in = x
-      x = self.norm(x)
-      x = x.reshape(b, c, h*w).permute(0,2,1)
-      x = self.proj_in(x)
-      for block in self.transformer_blocks:
-         x = block(x, context=context)
-      x = self.proj_out(x)
-      x = x.permute(0,2,1).reshape(b, c, h, w)
-      return x + x_in
+      def __call__(self, x:Tensor) -> Tensor:
+         return x.sequential(self.net)
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L235
-class Downsample:
-   def __init__(self, channels:int):
-      self.op = Conv2d(channels, channels, 3, stride=2, padding=1)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L200
+   class BasicTransformerBlock:
+      def __init__(self, dim:int, ctx_dim:int, n_heads:int, d_head:int):
+         self.attn1 = UNet.CrossAttention(dim, dim, n_heads, d_head)
+         self.ff = UNet.FeedForward(dim)
+         self.attn2 = UNet.CrossAttention(dim, ctx_dim, n_heads, d_head)
+         self.norm1 = LayerNorm(dim)
+         self.norm2 = LayerNorm(dim)
+         self.norm3 = LayerNorm(dim)
 
-   def __call__(self, x:Tensor) -> Tensor:
-      return self.op(x)
+      def __call__(self, x, context=None):
+         x = self.attn1(self.norm1(x)) + x
+         x = self.attn2(self.norm2(x), context=context) + x
+         x = self.ff(self.norm3(x)) + x
+         return x
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L242
-class Upsample:
-   def __init__(self, channels:int):
-      self.conv = Conv2d(channels, channels, 3, padding=1)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L215
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/attention.py#L619
+   class SpatialTransformer:
+      def __init__(self, channels:int, n_heads:int, d_head:int, ctx_dim:Union[int,List[int]], depth:int=1):
+         if isinstance(ctx_dim, int):
+            ctx_dim = [ctx_dim]*depth
+         else:
+            assert isinstance(ctx_dim, list) and depth == len(ctx_dim)
+         self.norm = GroupNorm(32, channels)
+         assert channels == n_heads * d_head
+         self.proj_in = Linear(channels, n_heads * d_head)
+         self.transformer_blocks = [UNet.BasicTransformerBlock(channels, ctx_dim[d], n_heads, d_head) for d in range(depth)]
+         self.proj_out = Linear(n_heads * d_head, channels)
 
-   def __call__(self, x:Tensor) -> Tensor:
-      bs,c,py,px = x.shape
-      x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
-      return self.conv(x)
+      def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
+         b, c, h, w = x.shape
+         x_in = x
+         x = self.norm(x)
+         x = x.reshape(b, c, h*w).permute(0,2,1)
+         x = self.proj_in(x)
+         for block in self.transformer_blocks:
+            x = block(x, context=context)
+         x = self.proj_out(x)
+         x = x.permute(0,2,1).reshape(b, c, h, w)
+         return x + x_in
+
+
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L235
+   class Downsample:
+      def __init__(self, channels:int):
+         self.op = Conv2d(channels, channels, 3, stride=2, padding=1)
+
+      def __call__(self, x:Tensor) -> Tensor:
+         return self.op(x)
+
+
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L242
+   class Upsample:
+      def __init__(self, channels:int):
+         self.conv = Conv2d(channels, channels, 3, padding=1)
+
+      def __call__(self, x:Tensor) -> Tensor:
+         bs,c,py,px = x.shape
+         x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
+         return self.conv(x)
 
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L251
@@ -211,27 +216,27 @@ class UNetModel:
       for idx, mult in enumerate(channel_mult):
          for _ in range(self.num_res_blocks[idx]):
             layers: List[Any] = [
-               ResBlock(ch, time_embed_dim, model_channels*mult),
+               UNet.ResBlock(ch, time_embed_dim, model_channels*mult),
             ]
             ch = mult * model_channels
             if ds in attention_resolutions:
                n_heads = ch // d_head
-               layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
+               layers.append(UNet.SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
             
             self.input_blocks.append(layers)
             input_block_channels.append(ch)
          
          if idx != len(channel_mult) - 1:
             self.input_blocks.append([
-               Downsample(ch),
+               UNet.Downsample(ch),
             ])
             ds *= 2
       
       n_heads = ch // d_head
       self.middle_block: List = [
-         ResBlock(ch, time_embed_dim, ch),
-         SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[-1]),
-         ResBlock(ch, time_embed_dim, ch),
+         UNet.ResBlock(ch, time_embed_dim, ch),
+         UNet.SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[-1]),
+         UNet.ResBlock(ch, time_embed_dim, ch),
       ]
 
       self.output_blocks = []
@@ -239,15 +244,15 @@ class UNetModel:
          for i in range(self.num_res_blocks[idx] + 1):
             ich = input_block_channels.pop()
             layers = [
-               ResBlock(ch + ich, time_embed_dim, model_channels*mult),
+               UNet.ResBlock(ch + ich, time_embed_dim, model_channels*mult),
             ]
             
             if ds in attention_resolutions:
                n_heads = ch // d_head
-               layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
+               layers.append(UNet.SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
             
             if idx > 0 and i == self.num_res_blocks[idx]:
-               layers.append(Upsample(ch))
+               layers.append(UNet.Upsample(ch))
             self.output_blocks.append(layers)
 
       self.out = [
@@ -261,8 +266,8 @@ class UNetModel:
       emb = t_emb.sequential(self.time_embed)
 
       def run(x:Tensor, bb) -> Tensor:
-         if isinstance(bb, ResBlock): x = bb(x, emb)
-         elif isinstance(bb, SpatialTransformer): x = bb(x, ctx)
+         if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
+         elif isinstance(bb, UNet.SpatialTransformer): x = bb(x, ctx)
          else: x = bb(x)
          return x
 
@@ -555,6 +560,7 @@ class Open:
          x = x.transpose(0, 1)
          return x
 
+
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
@@ -611,6 +617,58 @@ class Conditioner:
       self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
 
 
+class FirstStage:
+   """
+   Namespace for First Stage Model components
+   """
+
+   class ResnetBlock:
+      def __init__(self, in_dim, out_dim):
+         pass
+
+
+   class Downsample:
+      def __init__(self, dims:int, resamp_with_conv:bool):
+         pass
+
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L487
+   class Encoder:
+      def __init__(self, ch:int, in_ch:int, out_ch:int, z_ch:int, ch_mult:List[int], num_res_blocks:int, resolution:int):
+         self.conv_in = Conv2d(in_ch, ch, kernel_size=3, stride=1, padding=1)
+
+         curr_res = resolution
+         in_ch_mult = (1,) + tuple(ch_mult)
+
+         class BlockEntry:
+            def __init__(self, block:List[FirstStage.ResnetBlock], sample_name:str, sample_value:Optional[Any]):
+               self.block = block
+               if sample_value is not None:
+                  setattr(self, sample_name, sample_value)
+
+         self.down: List[Any] = []
+         for i_level in range(len(ch_mult)):
+            block = []
+            block_in  = ch * in_ch_mult[i_level]
+            block_out = ch * ch_mult   [i_level]
+            for i_block in range(num_res_blocks):
+               block.append(FirstStage.ResnetBlock(block_in, block_out))
+               block_in = block_out
+            
+            sample = None if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in, True)
+            self.down.append(BlockEntry(block, "downsample", sample))
+         
+
+
+
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L604
+   class Decoder:
+      pass
+
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L102
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L437
 class FirstStageModel:
    pass
 
