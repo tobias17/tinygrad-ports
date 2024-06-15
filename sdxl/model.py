@@ -421,7 +421,7 @@ class ClipEncoderLayer:
       self.mlp = ClipMlp()
       self.layer_norm2 = LayerNorm(768)
 
-   def __call__(self, hidden_states, causal_attention_mask):
+   def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
       residual = hidden_states
       hidden_states = self.layer_norm1(hidden_states)
       hidden_states = self.self_attn(hidden_states, causal_attention_mask)
@@ -437,36 +437,38 @@ class ClipEncoderLayer:
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
 class ClipEncoder:
-  def __init__(self):
-    self.layers = [ClipEncoderLayer() for i in range(12)]
+   def __init__(self, layer_run_count:Optional[int]=None):
+      self.layers = [ClipEncoderLayer() for i in range(12)]
+      self.layer_run_count = layer_run_count
 
-  def __call__(self, hidden_states, causal_attention_mask):
-    for l in self.layers:
-      hidden_states = l(hidden_states, causal_attention_mask)
-    return hidden_states
+   def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
+      for l in self.layers[:self.layer_run_count]:
+         hidden_states = l(hidden_states, causal_attention_mask)
+      return hidden_states
 
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L386
 class ClipTextEmbeddings:
   def __init__(self):
-    self.token_embedding = Embedding(49408, 768)
+    self.token_embedding    = Embedding(49408, 768)
     self.position_embedding = Embedding(77, 768)
 
-  def __call__(self, input_ids, position_ids):
+  def __call__(self, input_ids:Tensor, position_ids:Tensor) -> Tensor:
     return self.token_embedding(input_ids) + self.position_embedding(position_ids)
 
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L394
 class ClipTextTransformer:
-   def __init__(self):
-      self.embeddings = ClipTextEmbeddings()
-      self.encoder = ClipEncoder()
+   def __init__(self, layer_run_count:Optional[int]=None):
+      self.embeddings       = ClipTextEmbeddings()
+      self.encoder          = ClipEncoder(layer_run_count)
       self.final_layer_norm = LayerNorm(768)
+      self.layer_run_count  = layer_run_count
 
    def __call__(self, input_ids):
       x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
       x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
-      return self.final_layer_norm(x)
+      return self.final_layer_norm(x) if self.layer_run_count is None else x
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
@@ -474,7 +476,8 @@ class FrozenClipEmbedder:
    # layer: hidden
    # layer_idx: 11
    def __init__(self):
-      pass
+      self.tokenizer   = ClipTokenizer()
+      self.transformer = ClipTextTransformer(layer_run_count=11+1)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
