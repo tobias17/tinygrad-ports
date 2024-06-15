@@ -8,7 +8,8 @@ from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from typing import Dict, List, Union, Callable, Optional, Any, OrderedDict
+from typing import Dict, List, Union, Callable, Optional, Any
+from collections import namedtuple
 from functools import lru_cache
 import os, math, re, gzip
 
@@ -625,11 +626,38 @@ class FirstStage:
    class ResnetBlock:
       def __init__(self, in_dim, out_dim):
          pass
+      
+      def __call__(self, x:Tensor) -> Tensor:
+         return x # FIXME
 
 
    class Downsample:
       def __init__(self, dims:int, resamp_with_conv:bool):
          pass
+
+      def __call__(self, x:Tensor) -> Tensor:
+         return x # FIXME
+
+
+   class Upsample:
+      def __init__(self, dims:int, resamp_with_conv:bool):
+         pass
+
+      def __call__(self, x:Tensor) -> Tensor:
+         return x # FIXME
+
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L204
+   class AttnBlock:
+      def __init__(self, in_channels:int):
+         pass
+
+
+   class MidEntry:
+      def __init__(self, block_in:int):
+         self.block_1 = FirstStage.ResnetBlock(block_in, block_in),
+         self.attn_1  = FirstStage.AttnBlock  (block_in),
+         self.block_2 = FirstStage.ResnetBlock(block_in, block_in),
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L487
@@ -641,12 +669,10 @@ class FirstStage:
          in_ch_mult = (1,) + tuple(ch_mult)
 
          class BlockEntry:
-            def __init__(self, block:List[FirstStage.ResnetBlock], sample_name:str, sample_value:Optional[Any]):
+            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Tensor],Tensor]):
                self.block = block
-               if sample_value is not None:
-                  setattr(self, sample_name, sample_value)
-
-         self.down: List[Any] = []
+               self.downsample = downsample
+         self.down: List[BlockEntry] = []
          for i_level in range(len(ch_mult)):
             block = []
             block_in  = ch * in_ch_mult[i_level]
@@ -655,16 +681,67 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            sample = None if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in, True)
-            self.down.append(BlockEntry(block, "downsample", sample))
+            downsample = lambda x: x if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in, True)
+            self.down.append(BlockEntry(block, downsample))
          
+         self.mid = FirstStage.MidEntry(block_in)
 
-
+         self.norm_out = GroupNorm(32, in_ch)
+         self.conv_out = Conv2d(block_in, 2*z_ch, kernel_size=3, stride=1, padding=1)
+      
+      def __call__(self, x:Tensor) -> Tensor:
+         h = self.conv_in(x)
+         for down in self.down:
+            for block in down.block:
+               h = block(h)
+            h = down.downsample(h)
+         
+         h = h.sequential([self.mid.block_1, self.mid.attn_1, self.mid.block_2])
+         h = h.sequential([self.norm_out,    Tensor.swish,    self.conv_out   ])
+         return h
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L604
    class Decoder:
-      pass
+      def __init__(self, ch:int, in_ch:int, out_ch:int, z_ch:int, ch_mult:List[int], num_res_blocks:int, resolution:int):
+         block_in = ch * ch_mult[-1]
+         curr_res = resolution // 2 ** (len(ch_mult) - 1)
+         self.z_shape = (1, z_ch, curr_res, curr_res)
+         
+         self.conv_in = Conv2d(z_ch, block_in, kernel_size=3, stride=1, padding=1)
+         
+         self.mid = FirstStage.MidEntry(block_in)
+
+         class BlockEntry:
+            def __init__(self, block:List[FirstStage.ResnetBlock], upsample:Callable[[Tensor],Tensor]):
+               self.block = block
+               self.upsample = upsample
+         self.up: List[BlockEntry] = []
+         for i_level in reversed(range(len(ch_mult))):
+            block = []
+            block_out = ch * ch_mult[i_level]
+            for _ in range(num_res_blocks + 1):
+               block.append(FirstStage.ResnetBlock(block_in, block_out))
+               block_in = block_out
+            
+            upsample = lambda x: x if i_level == 0 else FirstStage.Upsample(block_in, True)
+            self.up.insert(0, BlockEntry(block, upsample))
+         
+         self.norm_out = GroupNorm(32, in_ch)
+         self.conv_out = Conv2d(block_in, 2*z_ch, kernel_size=3, stride=1, padding=1)
+
+      def __call__(self, z:Tensor) -> Tensor:
+         self.last_z_shape = z.shape
+
+         h = z.sequential([self.conv_in, self.mid.block_1, self.mid.attn_1, self.mid.block_2])
+
+         for up in self.up:
+            for block in up.block:
+               h = block(h)
+            h = up.upsample(h)
+      
+         h = h.sequential([self.norm_out, Tensor.swish, self.conv_out])
+         return h
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L102
