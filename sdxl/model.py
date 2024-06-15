@@ -623,6 +623,7 @@ class FirstStage:
    Namespace for First Stage Model components
    """
 
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L94
    class ResnetBlock:
       def __init__(self, in_dim, out_dim):
          pass
@@ -631,20 +632,26 @@ class FirstStage:
          return x # FIXME
 
 
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L74
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L102
    class Downsample:
-      def __init__(self, dims:int, resamp_with_conv:bool):
-         pass
+      def __init__(self, dims:int):
+         self.conv = Conv2d(dims, dims, kernel_size=3, stride=2, padding=(0,1,0,1))
 
       def __call__(self, x:Tensor) -> Tensor:
-         return x # FIXME
+         return self.conv(x)
 
 
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L58
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L83
    class Upsample:
-      def __init__(self, dims:int, resamp_with_conv:bool):
-         pass
+      def __init__(self, dims:int):
+         self.conv = Conv2d(dims, dims, kernel_size=3, stride=1, padding=1)
 
       def __call__(self, x:Tensor) -> Tensor:
-         return x # FIXME
+         B,C,Y,X = x.shape
+         x = x.reshape(B, C, Y, 1, X, 1).expand(B, C, Y, 2, X, 2).reshape(B, C, Y*2, X*2)
+         return self.conv(x)
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L204
@@ -681,7 +688,7 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            downsample = lambda x: x if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in, True)
+            downsample = lambda x: x if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in)
             self.down.append(BlockEntry(block, downsample))
          
          self.mid = FirstStage.MidEntry(block_in)
@@ -709,7 +716,7 @@ class FirstStage:
          self.z_shape = (1, z_ch, curr_res, curr_res)
          
          self.conv_in = Conv2d(z_ch, block_in, kernel_size=3, stride=1, padding=1)
-         
+
          self.mid = FirstStage.MidEntry(block_in)
 
          class BlockEntry:
@@ -724,22 +731,22 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            upsample = lambda x: x if i_level == 0 else FirstStage.Upsample(block_in, True)
+            upsample = lambda x: x if i_level == 0 else FirstStage.Upsample(block_in)
             self.up.insert(0, BlockEntry(block, upsample))
          
          self.norm_out = GroupNorm(32, in_ch)
          self.conv_out = Conv2d(block_in, 2*z_ch, kernel_size=3, stride=1, padding=1)
-
+      
       def __call__(self, z:Tensor) -> Tensor:
          self.last_z_shape = z.shape
-
+         
          h = z.sequential([self.conv_in, self.mid.block_1, self.mid.attn_1, self.mid.block_2])
-
+         
          for up in self.up:
             for block in up.block:
                h = block(h)
             h = up.upsample(h)
-      
+         
          h = h.sequential([self.norm_out, Tensor.swish, self.conv_out])
          return h
 
