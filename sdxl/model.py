@@ -6,13 +6,14 @@
 from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
 from tinygrad.nn.state import safe_load # type: ignore
+from tinygrad.helpers import fetch # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any
-import os, math
+from functools import lru_cache
+import os, math, re, gzip
 
 # configs:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_refiner.yaml
-
 configs: Dict = {
    "SDXL_Base": {
       "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
@@ -25,6 +26,7 @@ configs: Dict = {
       "first_stage_model": {},
    }
 }
+
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L136
 class ResBlock:
@@ -53,6 +55,7 @@ class ResBlock:
       h = h.sequential(self.out_layers)
       return self.skip_connection(x) + h
 
+
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L163
 class CrossAttention:
    def __init__(self, query_dim, context_dim, n_heads, d_head):
@@ -71,6 +74,7 @@ class CrossAttention:
       h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
       return h_.sequential(self.to_out)
 
+
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L180
 class GEGLU:
    def __init__(self, dim_in:int, dim_out:int):
@@ -80,6 +84,7 @@ class GEGLU:
    def __call__(self, x:Tensor) -> Tensor:
       x, gate = self.proj(x).chunk(2, dim=-1)
       return x * gate.gelu()
+
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L189
 class FeedForward:
@@ -92,6 +97,7 @@ class FeedForward:
 
    def __call__(self, x:Tensor) -> Tensor:
       return x.sequential(self.net)
+
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L200
 class BasicTransformerBlock:
@@ -108,6 +114,7 @@ class BasicTransformerBlock:
       x = self.attn2(self.norm2(x), context=context) + x
       x = self.ff(self.norm3(x)) + x
       return x
+
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L215
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/attention.py#L619
@@ -135,6 +142,7 @@ class SpatialTransformer:
       x = x.permute(0,2,1).reshape(b, c, h, w)
       return x + x_in
 
+
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L235
 class Downsample:
    def __init__(self, channels:int):
@@ -142,6 +150,7 @@ class Downsample:
 
    def __call__(self, x:Tensor) -> Tensor:
       return self.op(x)
+
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L242
 class Upsample:
@@ -153,12 +162,14 @@ class Upsample:
       x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
       return self.conv(x)
 
+
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L251
 def timestep_embedding(timesteps, dim, max_period=10000):
    half = dim // 2
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
    args = timesteps * freqs
    return Tensor.cat(args.cos(), args.sin()).reshape(1, -1)
+
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L257
@@ -267,14 +278,125 @@ class UNetModel:
             x = run(x, bb)
       return x.sequential(self.out)
 
-class FrozenClipEmbedder:
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L409
+def get_pairs(word):
+   """
+   Return set of symbol pairs in a word.
+   Word is represented as tuple of symbols (symbols being variable-length strings).
+   """
+   return set(zip(word, word[1:]))
+def whitespace_clean(text):
+   text = re.sub(r'\s+', ' ', text)
+   text = text.strip()
+   return text
+def bytes_to_unicode():
+   """
+   Returns list of utf-8 byte and a corresponding list of unicode strings.
+   The reversible bpe codes work on unicode strings.
+   This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
+   When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
+   This is a significant percentage of your normal, say, 32K bpe vocab.
+   To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
+   And avoids mapping to whitespace/control characters the bpe code barfs on.
+   """
+   bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
+   cs = bs[:]
+   n = 0
+   for b in range(2**8):
+      if b not in bs:
+         bs.append(b)
+         cs.append(2**8+n)
+         n += 1
+   cs = [chr(n) for n in cs]
+   return dict(zip(bs, cs))
+# Clip tokenizer, taken from https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py (MIT license)
+@lru_cache()
+def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
+class ClipTokenizer:
+   def __init__(self, bpe_path:str=default_bpe()):
+      self.byte_encoder = bytes_to_unicode()
+      merges: List[Any] = gzip.open(bpe_path).read().decode("utf-8").split('\n')
+      merges = merges[1:49152-256-2+1]
+      merges = [tuple(merge.split()) for merge in merges]
+      vocab = list(bytes_to_unicode().values())
+      vocab = vocab + [v+'</w>' for v in vocab]
+      for merge in merges:
+         vocab.append(''.join(merge))
+      vocab.extend(['<|startoftext|>', '<|endoftext|>'])
+      self.encoder = dict(zip(vocab, range(len(vocab))))
+      self.bpe_ranks = dict(zip(merges, range(len(merges))))
+      self.cache = {'<|startoftext|>': '<|startoftext|>', '<|endoftext|>': '<|endoftext|>'}
+      self.pat = re.compile(r"""<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[^\s]+""", re.IGNORECASE)
+
+   def bpe(self, token):
+      if token in self.cache:
+         return self.cache[token]
+      word = tuple(token[:-1]) + ( token[-1] + '</w>',)
+      pairs = get_pairs(word)
+
+      if not pairs:
+         return token+'</w>'
+
+      while True:
+         bigram = min(pairs, key = lambda pair: self.bpe_ranks.get(pair, float('inf')))
+         if bigram not in self.bpe_ranks:
+            break
+         first, second = bigram
+         new_word = []
+         i = 0
+         while i < len(word):
+            try:
+               j = word.index(first, i)
+               new_word.extend(word[i:j])
+               i = j
+            except Exception:
+               new_word.extend(word[i:])
+               break
+
+         if word[i] == first and i < len(word)-1 and word[i+1] == second:
+            new_word.append(first+second)
+            i += 2
+         else:
+            new_word.append(word[i])
+            i += 1
+         new_word = tuple(new_word)
+         word = new_word
+         if len(word) == 1:
+            break
+         pairs = get_pairs(word)
+      word = ' '.join(word)
+      self.cache[token] = word
+      return word
+
+   def encode(self, text):
+      bpe_tokens = []
+      text = whitespace_clean(text.strip()).lower()
+      for token in re.findall(self.pat, text):
+         token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
+         bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
+      # Truncation, keeping two slots for start and end tokens.
+      if len(bpe_tokens) > 75:
+         bpe_tokens = bpe_tokens[:75]
+      return [49406] + bpe_tokens + [49407] * (77 - len(bpe_tokens) - 1)
+
+
+class ClipTextModel:
    pass
 
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
+class FrozenClipEmbedder:
+   # layer: hidden
+   # layer_idx: 11
+   def __init__(self):
+      pass
+
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 class FrozenOpenClipEmbedder2:
    pass
 
-class Timestep:
-   pass
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
 class ConcatTimestepEmbedderND:
@@ -290,13 +412,16 @@ class ConcatTimestepEmbedderND:
       emb = x.reshape((b,-1))
       return emb
 
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
 class Conditioner:
    def __init__(self):
       self.embedders = []
 
+
 class FirstStageModel:
    pass
+
 
 class SDXL:
    def __init__(self, config:Dict):
