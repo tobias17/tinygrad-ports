@@ -4,7 +4,7 @@
 # Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE)
 
 from tinygrad.tensor import Tensor # type: ignore
-from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
+from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any
@@ -381,8 +381,92 @@ class ClipTokenizer:
       return [49406] + bpe_tokens + [49407] * (77 - len(bpe_tokens) - 1)
 
 
-class ClipTextModel:
-   pass
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L329
+class ClipMlp:
+   def __init__(self):
+      self.fc1 = Linear(768, 3072)
+      self.fc2 = Linear(3072, 768)
+
+   def __call__(self, hidden_states):
+      hidden_states = self.fc1(hidden_states)
+      hidden_states = hidden_states.quick_gelu()
+      hidden_states = self.fc2(hidden_states)
+      return hidden_states
+
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L340
+class ClipAttention:
+   def __init__(self):
+      self.embed_dim = 768
+      self.num_heads = 12
+      self.head_dim = self.embed_dim // self.num_heads
+      self.k_proj = Linear(self.embed_dim, self.embed_dim)
+      self.v_proj = Linear(self.embed_dim, self.embed_dim)
+      self.q_proj = Linear(self.embed_dim, self.embed_dim)
+      self.out_proj = Linear(self.embed_dim, self.embed_dim)
+
+   def __call__(self, hidden_states, causal_attention_mask):
+      bsz, tgt_len, embed_dim = hidden_states.shape
+      q,k,v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+      q,k,v = [x.reshape(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2) for x in (q,k,v)]
+      attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=causal_attention_mask)
+      return self.out_proj(attn_output.transpose(1, 2).reshape(bsz, tgt_len, embed_dim))
+
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L357
+class ClipEncoderLayer:
+   def __init__(self):
+      self.self_attn = ClipAttention()
+      self.layer_norm1 = LayerNorm(768)
+      self.mlp = ClipMlp()
+      self.layer_norm2 = LayerNorm(768)
+
+   def __call__(self, hidden_states, causal_attention_mask):
+      residual = hidden_states
+      hidden_states = self.layer_norm1(hidden_states)
+      hidden_states = self.self_attn(hidden_states, causal_attention_mask)
+      hidden_states = residual + hidden_states
+
+      residual = hidden_states
+      hidden_states = self.layer_norm2(hidden_states)
+      hidden_states = self.mlp(hidden_states)
+      hidden_states = residual + hidden_states
+
+      return hidden_states
+
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
+class ClipEncoder:
+  def __init__(self):
+    self.layers = [ClipEncoderLayer() for i in range(12)]
+
+  def __call__(self, hidden_states, causal_attention_mask):
+    for l in self.layers:
+      hidden_states = l(hidden_states, causal_attention_mask)
+    return hidden_states
+
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L386
+class ClipTextEmbeddings:
+  def __init__(self):
+    self.token_embedding = Embedding(49408, 768)
+    self.position_embedding = Embedding(77, 768)
+
+  def __call__(self, input_ids, position_ids):
+    return self.token_embedding(input_ids) + self.position_embedding(position_ids)
+
+
+# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L394
+class ClipTextTransformer:
+   def __init__(self):
+      self.embeddings = ClipTextEmbeddings()
+      self.encoder = ClipEncoder()
+      self.final_layer_norm = LayerNorm(768)
+
+   def __call__(self, input_ids):
+      x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
+      x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
+      return self.final_layer_norm(x)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
