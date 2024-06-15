@@ -1,7 +1,8 @@
 # This file incorporates code from the following:
 # Github Name                    | License | Link
-# tinygrad/tinygrad              | MIT     | https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/LICENSE)
-# Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE)
+# tinygrad/tinygrad              | MIT     | https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/LICENSE
+# Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE
+# mlfoundations/open_clip        | MIT     | https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/LICENSE
 
 from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
@@ -279,209 +280,270 @@ class UNetModel:
       return x.sequential(self.out)
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L409
-def get_pairs(word):
+class Closed:
    """
-   Return set of symbol pairs in a word.
-   Word is represented as tuple of symbols (symbols being variable-length strings).
+   Namespace for OpenAI CLIP model components.
    """
-   return set(zip(word, word[1:]))
-def whitespace_clean(text):
-   text = re.sub(r'\s+', ' ', text)
-   text = text.strip()
-   return text
-def bytes_to_unicode():
-   """
-   Returns list of utf-8 byte and a corresponding list of unicode strings.
-   The reversible bpe codes work on unicode strings.
-   This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
-   When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
-   This is a significant percentage of your normal, say, 32K bpe vocab.
-   To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
-   And avoids mapping to whitespace/control characters the bpe code barfs on.
-   """
-   bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
-   cs = bs[:]
-   n = 0
-   for b in range(2**8):
-      if b not in bs:
-         bs.append(b)
-         cs.append(2**8+n)
-         n += 1
-   cs = [chr(n) for n in cs]
-   return dict(zip(bs, cs))
-# Clip tokenizer, taken from https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py (MIT license)
-@lru_cache()
-def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
-class ClipTokenizer:
-   def __init__(self, bpe_path:str=default_bpe()):
-      self.byte_encoder = bytes_to_unicode()
-      merges: List[Any] = gzip.open(bpe_path).read().decode("utf-8").split('\n')
-      merges = merges[1:49152-256-2+1]
-      merges = [tuple(merge.split()) for merge in merges]
-      vocab = list(bytes_to_unicode().values())
-      vocab = vocab + [v+'</w>' for v in vocab]
-      for merge in merges:
-         vocab.append(''.join(merge))
-      vocab.extend(['<|startoftext|>', '<|endoftext|>'])
-      self.encoder = dict(zip(vocab, range(len(vocab))))
-      self.bpe_ranks = dict(zip(merges, range(len(merges))))
-      self.cache = {'<|startoftext|>': '<|startoftext|>', '<|endoftext|>': '<|endoftext|>'}
-      self.pat = re.compile(r"""<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[^\s]+""", re.IGNORECASE)
 
-   def bpe(self, token):
-      if token in self.cache:
-         return self.cache[token]
-      word = tuple(token[:-1]) + ( token[-1] + '</w>',)
-      pairs = get_pairs(word)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L409
+   @staticmethod
+   def get_pairs(word):
+      """
+      Return set of symbol pairs in a word.
+      Word is represented as tuple of symbols (symbols being variable-length strings).
+      """
+      return set(zip(word, word[1:]))
+   @staticmethod
+   def whitespace_clean(text):
+      text = re.sub(r'\s+', ' ', text)
+      text = text.strip()
+      return text
+   @staticmethod
+   def bytes_to_unicode():
+      """
+      Returns list of utf-8 byte and a corresponding list of unicode strings.
+      The reversible bpe codes work on unicode strings.
+      This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
+      When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
+      This is a significant percentage of your normal, say, 32K bpe vocab.
+      To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
+      And avoids mapping to whitespace/control characters the bpe code barfs on.
+      """
+      bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
+      cs = bs[:]
+      n = 0
+      for b in range(2**8):
+         if b not in bs:
+            bs.append(b)
+            cs.append(2**8+n)
+            n += 1
+      cs = [chr(n) for n in cs]
+      return dict(zip(bs, cs))
+   # Clip tokenizer, taken from https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py (MIT license)
+   @lru_cache()
+   @staticmethod
+   def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
+   class ClosedClipTokenizer:
+      def __init__(self):
+         self.byte_encoder = Closed.bytes_to_unicode()
+         merges: List[Any] = gzip.open(Closed.default_bpe()).read().decode("utf-8").split('\n')
+         merges = merges[1:49152-256-2+1]
+         merges = [tuple(merge.split()) for merge in merges]
+         vocab = list(Closed.bytes_to_unicode().values())
+         vocab = vocab + [v+'</w>' for v in vocab]
+         for merge in merges:
+            vocab.append(''.join(merge))
+         vocab.extend(['<|startoftext|>', '<|endoftext|>'])
+         self.encoder = dict(zip(vocab, range(len(vocab))))
+         self.bpe_ranks = dict(zip(merges, range(len(merges))))
+         self.cache = {'<|startoftext|>': '<|startoftext|>', '<|endoftext|>': '<|endoftext|>'}
+         self.pat = re.compile(r"""<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[^\s]+""", re.IGNORECASE)
 
-      if not pairs:
-         return token+'</w>'
+      def bpe(self, token):
+         if token in self.cache:
+            return self.cache[token]
+         word = tuple(token[:-1]) + ( token[-1] + '</w>',)
+         pairs = Closed.get_pairs(word)
 
-      while True:
-         bigram = min(pairs, key = lambda pair: self.bpe_ranks.get(pair, float('inf')))
-         if bigram not in self.bpe_ranks:
-            break
-         first, second = bigram
-         new_word = []
-         i = 0
-         while i < len(word):
-            try:
-               j = word.index(first, i)
-               new_word.extend(word[i:j])
-               i = j
-            except Exception:
-               new_word.extend(word[i:])
+         if not pairs:
+            return token+'</w>'
+
+         while True:
+            bigram = min(pairs, key = lambda pair: self.bpe_ranks.get(pair, float('inf')))
+            if bigram not in self.bpe_ranks:
                break
+            first, second = bigram
+            new_word = []
+            i = 0
+            while i < len(word):
+               try:
+                  j = word.index(first, i)
+                  new_word.extend(word[i:j])
+                  i = j
+               except Exception:
+                  new_word.extend(word[i:])
+                  break
 
-         if word[i] == first and i < len(word)-1 and word[i+1] == second:
-            new_word.append(first+second)
-            i += 2
-         else:
-            new_word.append(word[i])
-            i += 1
-         new_word = tuple(new_word)
-         word = new_word
-         if len(word) == 1:
-            break
-         pairs = get_pairs(word)
-      word = ' '.join(word)
-      self.cache[token] = word
-      return word
+            if word[i] == first and i < len(word)-1 and word[i+1] == second:
+               new_word.append(first+second)
+               i += 2
+            else:
+               new_word.append(word[i])
+               i += 1
+            new_word = tuple(new_word)
+            word = new_word
+            if len(word) == 1:
+               break
+            pairs = get_pairs(word)
+         word = ' '.join(word)
+         self.cache[token] = word
+         return word
 
-   def encode(self, text):
-      bpe_tokens = []
-      text = whitespace_clean(text.strip()).lower()
-      for token in re.findall(self.pat, text):
-         token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
-         bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
-      # Truncation, keeping two slots for start and end tokens.
-      if len(bpe_tokens) > 75:
-         bpe_tokens = bpe_tokens[:75]
-      return [49406] + bpe_tokens + [49407] * (77 - len(bpe_tokens) - 1)
-
-
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L329
-class ClipMlp:
-   def __init__(self):
-      self.fc1 = Linear(768, 3072)
-      self.fc2 = Linear(3072, 768)
-
-   def __call__(self, hidden_states):
-      hidden_states = self.fc1(hidden_states)
-      hidden_states = hidden_states.quick_gelu()
-      hidden_states = self.fc2(hidden_states)
-      return hidden_states
+      def encode(self, text):
+         bpe_tokens = []
+         text = whitespace_clean(text.strip()).lower()
+         for token in re.findall(self.pat, text):
+            token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
+            bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
+         # Truncation, keeping two slots for start and end tokens.
+         if len(bpe_tokens) > 75:
+            bpe_tokens = bpe_tokens[:75]
+         return [49406] + bpe_tokens + [49407] * (77 - len(bpe_tokens) - 1)
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L340
-class ClipAttention:
-   def __init__(self):
-      self.embed_dim = 768
-      self.num_heads = 12
-      self.head_dim = self.embed_dim // self.num_heads
-      self.k_proj = Linear(self.embed_dim, self.embed_dim)
-      self.v_proj = Linear(self.embed_dim, self.embed_dim)
-      self.q_proj = Linear(self.embed_dim, self.embed_dim)
-      self.out_proj = Linear(self.embed_dim, self.embed_dim)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L329
+   class ClipMlp:
+      def __init__(self):
+         self.fc1 = Linear(768, 3072)
+         self.fc2 = Linear(3072, 768)
 
-   def __call__(self, hidden_states, causal_attention_mask):
-      bsz, tgt_len, embed_dim = hidden_states.shape
-      q,k,v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-      q,k,v = [x.reshape(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2) for x in (q,k,v)]
-      attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=causal_attention_mask)
-      return self.out_proj(attn_output.transpose(1, 2).reshape(bsz, tgt_len, embed_dim))
+      def __call__(self, hidden_states):
+         hidden_states = self.fc1(hidden_states)
+         hidden_states = hidden_states.quick_gelu()
+         hidden_states = self.fc2(hidden_states)
+         return hidden_states
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L357
-class ClipEncoderLayer:
-   def __init__(self):
-      self.self_attn = ClipAttention()
-      self.layer_norm1 = LayerNorm(768)
-      self.mlp = ClipMlp()
-      self.layer_norm2 = LayerNorm(768)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L340
+   class ClipAttention:
+      def __init__(self):
+         self.embed_dim = 768
+         self.num_heads = 12
+         self.head_dim = self.embed_dim // self.num_heads
+         self.k_proj = Linear(self.embed_dim, self.embed_dim)
+         self.v_proj = Linear(self.embed_dim, self.embed_dim)
+         self.q_proj = Linear(self.embed_dim, self.embed_dim)
+         self.out_proj = Linear(self.embed_dim, self.embed_dim)
 
-   def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
-      residual = hidden_states
-      hidden_states = self.layer_norm1(hidden_states)
-      hidden_states = self.self_attn(hidden_states, causal_attention_mask)
-      hidden_states = residual + hidden_states
-
-      residual = hidden_states
-      hidden_states = self.layer_norm2(hidden_states)
-      hidden_states = self.mlp(hidden_states)
-      hidden_states = residual + hidden_states
-
-      return hidden_states
+      def __call__(self, hidden_states, causal_attention_mask):
+         bsz, tgt_len, embed_dim = hidden_states.shape
+         q,k,v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+         q,k,v = [x.reshape(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2) for x in (q,k,v)]
+         attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=causal_attention_mask)
+         return self.out_proj(attn_output.transpose(1, 2).reshape(bsz, tgt_len, embed_dim))
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
-class ClipEncoder:
-   def __init__(self, layer_run_count:Optional[int]=None):
-      self.layers = [ClipEncoderLayer() for i in range(12)]
-      self.layer_run_count = layer_run_count
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L357
+   class ClipEncoderLayer:
+      def __init__(self):
+         self.self_attn = Closed.ClipAttention()
+         self.layer_norm1 = LayerNorm(768)
+         self.mlp = Closed.ClosedClipMlp()
+         self.layer_norm2 = LayerNorm(768)
 
-   def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
-      for l in self.layers[:self.layer_run_count]:
-         hidden_states = l(hidden_states, causal_attention_mask)
-      return hidden_states
+      def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
+         residual = hidden_states
+         hidden_states = self.layer_norm1(hidden_states)
+         hidden_states = self.self_attn(hidden_states, causal_attention_mask)
+         hidden_states = residual + hidden_states
+
+         residual = hidden_states
+         hidden_states = self.layer_norm2(hidden_states)
+         hidden_states = self.mlp(hidden_states)
+         hidden_states = residual + hidden_states
+
+         return hidden_states
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L386
-class ClipTextEmbeddings:
-  def __init__(self):
-    self.token_embedding    = Embedding(49408, 768)
-    self.position_embedding = Embedding(77, 768)
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
+   class ClipEncoder:
+      def __init__(self, layer_run_count:Optional[int]=None):
+         self.layers = [Closed.ClipEncoderLayer() for i in range(12)]
+         self.layer_run_count = layer_run_count
 
-  def __call__(self, input_ids:Tensor, position_ids:Tensor) -> Tensor:
-    return self.token_embedding(input_ids) + self.position_embedding(position_ids)
+      def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
+         for l in self.layers[:self.layer_run_count]:
+            hidden_states = l(hidden_states, causal_attention_mask)
+         return hidden_states
 
 
-# https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L394
-class ClipTextTransformer:
-   def __init__(self, layer_run_count:Optional[int]=None):
-      self.embeddings       = ClipTextEmbeddings()
-      self.encoder          = ClipEncoder(layer_run_count)
-      self.final_layer_norm = LayerNorm(768)
-      self.layer_run_count  = layer_run_count
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L386
+   class ClipTextEmbeddings:
+      def __init__(self):
+         self.token_embedding    = Embedding(49408, 768)
+         self.position_embedding = Embedding(77, 768)
 
-   def __call__(self, input_ids):
-      x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
-      x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
-      return self.final_layer_norm(x) if self.layer_run_count is None else x
+      def __call__(self, input_ids:Tensor, position_ids:Tensor) -> Tensor:
+         return self.token_embedding(input_ids) + self.position_embedding(position_ids)
+
+
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L394
+   class ClipTextTransformer:
+      def __init__(self, layer_run_count:Optional[int]=None):
+         self.embeddings       = Closed.ClipTextEmbeddings()
+         self.encoder          = Closed.ClipEncoder(layer_run_count)
+         self.final_layer_norm = LayerNorm(768)
+         self.layer_run_count  = layer_run_count
+
+      def __call__(self, input_ids):
+         x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
+         x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
+         return self.final_layer_norm(x) if self.layer_run_count is None else x
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
-class FrozenClipEmbedder:
-   # layer: hidden
-   # layer_idx: 11
+class FrozenClosedClipEmbedder:
    def __init__(self):
-      self.tokenizer   = ClipTokenizer()
-      self.transformer = ClipTextTransformer(layer_run_count=11+1)
+      self.tokenizer   = Closed.ClipTokenizer()
+      self.transformer = Closed.ClipTextTransformer(layer_run_count=11+1)
 
 
+class Open:
+   """
+   Namespace for OpenCLIP model components.
+   """
+
+   class MultiheadAttention:
+      pass
+
+
+   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L210
+   class ResidualAttentionBlocks:
+      def __init__(self, width:int, n_heads:int, mlp_ratio:float):
+         self.ln_1 = LayerNorm(width)
+         self.attn = Open.MultiheadAttention(width, n_heads)
+
+
+   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L317
+   class ClipTransformer:
+      def __init__(self, width:int, layers:int, n_heads:int, mlp_ratio:float=4.0):
+         self.resblocks = [
+            Open.ResidualAttentionBlocks(width, n_heads, mlp_ratio) for _ in range(layers)
+         ]
+      
+      def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
+         x = x.transpose(0, 1).contiguous()
+         for r in self.resblocks:
+            x = r(x, attn_mask=attn_mask)
+         x = x.transpose(0, 1)
+         return x
+
+
+   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
+   class ClipTextTransformer:
+      def __init__(self, ctx_length:int=77, vocab_size:int=49408, width:int=1024, n_heads:int=16, layers:int=24):
+         self.token_embedding = Embedding(vocab_size, width)
+         self.positional_embedding = Tensor.empty(ctx_length, width)
+         self.transformer = Open.ClipTransformer(width, layers, n_heads)
+
+
+   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
+   class Clip:
+      def __init__(self):
+         self.transformer = Open.ClipTextTransformer()
+
+{
+    "embed_dim": 1024,
+   #  "text_cfg": {
+   #      "context_length": 77,
+   #      "vocab_size": 49408,
+   #      "width": 1024,
+   #      "heads": 16,
+   #      "layers": 24
+   #  }
+}
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
-class FrozenOpenClipEmbedder2:
+class FrozenOpenClipEmbedder:
    pass
 
 
