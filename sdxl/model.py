@@ -494,21 +494,50 @@ class Open:
    """
 
    class MultiheadAttention:
-      pass
+      def __init__(self, dims:int, n_heads:int):
+         self.dims     = dims
+         self.n_heads  = n_heads
+         self.d_head   = self.dims // self.n_heads
+         self.k_proj   = Linear(self.dims, self.dims)
+         self.v_proj   = Linear(self.dims, self.dims)
+         self.q_proj   = Linear(self.dims, self.dims)
+         self.out_proj = Linear(self.dims, self.dims)
+
+      def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
+         B,L,D = x.shape
+         q,k,v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+         q,k,v = [x.reshape(B, L, self.n_heads, self.d_head).transpose(1, 2) for x in (q,k,v)]
+         attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+         return self.out_proj(attn_output.transpose(1, 2).reshape(B, L, D))
 
 
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L210
    class ResidualAttentionBlocks:
-      def __init__(self, width:int, n_heads:int, mlp_ratio:float):
-         self.ln_1 = LayerNorm(width)
-         self.attn = Open.MultiheadAttention(width, n_heads)
+      def __init__(self, dims:int, n_heads:int, mlp_ratio:float):
+         self.ln_1 = LayerNorm(dims)
+         self.attn = Open.MultiheadAttention(dims, n_heads)
+         self.ls_1 = lambda x: x
+
+         self.ln_2 = LayerNorm(dims)
+         d_mlp     = int(dims * mlp_ratio)
+         self.mlp  = [
+            Linear(dims, d_mlp),
+            Tensor.gelu,
+            Linear(d_mlp, dims),
+         ]
+         self.ls_2 = lambda x: x
+      
+      def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
+         x = x + x.sequential([self.ln_1, lambda z: self.attn(z, attn_mask), self.ls_1])
+         x = x + x.sequential([self.ln_2, self.mlp, self.ls_2])
+         return x
 
 
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L317
    class ClipTransformer:
-      def __init__(self, width:int, layers:int, n_heads:int, mlp_ratio:float=4.0):
+      def __init__(self, dims:int, layers:int, n_heads:int, mlp_ratio:float=4.0):
          self.resblocks = [
-            Open.ResidualAttentionBlocks(width, n_heads, mlp_ratio) for _ in range(layers)
+            Open.ResidualAttentionBlocks(dims, n_heads, mlp_ratio) for _ in range(layers)
          ]
       
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
@@ -521,10 +550,10 @@ class Open:
 
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
-      def __init__(self, ctx_length:int=77, vocab_size:int=49408, width:int=1024, n_heads:int=16, layers:int=24):
-         self.token_embedding = Embedding(vocab_size, width)
-         self.positional_embedding = Tensor.empty(ctx_length, width)
-         self.transformer = Open.ClipTransformer(width, layers, n_heads)
+      def __init__(self, ctx_length:int=77, vocab_size:int=49408, dims:int=1024, n_heads:int=16, layers:int=24):
+         self.token_embedding = Embedding(vocab_size, dims)
+         self.positional_embedding = Tensor.empty(ctx_length, dims)
+         self.transformer = Open.ClipTransformer(dims, layers, n_heads)
 
 
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
