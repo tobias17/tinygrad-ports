@@ -267,17 +267,42 @@ class UNetModel:
             x = run(x, bb)
       return x.sequential(self.out)
 
-class Conditioner:
+class FrozenClipEmbedder:
    pass
+
+class FrozenOpenClipEmbedder2:
+   pass
+
+class Timestep:
+   pass
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
+class ConcatTimestepEmbedderND:
+   def __init__(self, outdim:int, input_key:str):
+      self.outdim = outdim
+      self.input_key = input_key
+
+   def __call__(self, x:Tensor):
+      assert len(x.shape) == 2
+      b, _ = x.shape
+      x = x.flatten()
+      emb = timestep_embedding(x, self.outdim)
+      emb = x.reshape((b,-1))
+      return emb
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
+class Conditioner:
+   def __init__(self):
+      self.embedders = []
 
 class FirstStageModel:
    pass
 
 class SDXL:
-   def __init__(self):
-      self.model = UNetModel()
-      self.conditioner = None
-      self.first_stage_model = None
+   def __init__(self, config:Dict):
+      self.model = UNetModel(**config["model"])
+      self.conditioner = Conditioner(**config["conditioner"])
+      self.first_stage_model = FirstStageModel(**config["first_stage_model"])
 
 if __name__ == "__main__":
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
