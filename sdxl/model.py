@@ -323,10 +323,10 @@ class Closed:
    @lru_cache()
    @staticmethod
    def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
-   class ClosedClipTokenizer:
+   class ClipTokenizer:
       def __init__(self):
          self.byte_encoder = Closed.bytes_to_unicode()
-         merges: List[Any] = gzip.open(Closed.default_bpe()).read().decode("utf-8").split('\n')
+         merges = gzip.open(Closed.default_bpe()).read().decode("utf-8").split('\n')
          merges = merges[1:49152-256-2+1]
          merges = [tuple(merge.split()) for merge in merges]
          vocab = list(Closed.bytes_to_unicode().values())
@@ -374,14 +374,14 @@ class Closed:
             word = new_word
             if len(word) == 1:
                break
-            pairs = get_pairs(word)
+            pairs = Closed.get_pairs(word)
          word = ' '.join(word)
          self.cache[token] = word
          return word
 
       def encode(self, text):
          bpe_tokens = []
-         text = whitespace_clean(text.strip()).lower()
+         text = Closed.whitespace_clean(text.strip()).lower()
          for token in re.findall(self.pat, text):
             token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
             bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
@@ -428,7 +428,7 @@ class Closed:
       def __init__(self):
          self.self_attn = Closed.ClipAttention()
          self.layer_norm1 = LayerNorm(768)
-         self.mlp = Closed.ClosedClipMlp()
+         self.mlp = Closed.ClipMlp()
          self.layer_norm2 = LayerNorm(768)
 
       def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
@@ -479,13 +479,17 @@ class Closed:
          x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
          x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
          return self.final_layer_norm(x) if self.layer_run_count is None else x
+   
+   class ClipTextModel:
+      def __init__(self):
+         self.text_model = Closed.ClipTextTransformer(layer_run_count=11+1)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
 class FrozenClosedClipEmbedder:
    def __init__(self):
       self.tokenizer   = Closed.ClipTokenizer()
-      self.transformer = Closed.ClipTextTransformer(layer_run_count=11+1)
+      self.transformer = Closed.ClipTextModel()
 
 
 class Open:
@@ -498,17 +502,28 @@ class Open:
          self.dims     = dims
          self.n_heads  = n_heads
          self.d_head   = self.dims // self.n_heads
-         self.k_proj   = Linear(self.dims, self.dims)
-         self.v_proj   = Linear(self.dims, self.dims)
-         self.q_proj   = Linear(self.dims, self.dims)
-         self.out_proj = Linear(self.dims, self.dims)
+
+         self.in_proj_bias   = Tensor.empty(3*dims)
+         self.in_proj_weight = Tensor.empty(3*dims, dims)
+         self.out_proj = Linear(dims, dims)
 
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
          B,L,D = x.shape
-         q,k,v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+         q_b, k_b, v_b = self.in_proj_bias  .chunk(3, dim=0)
+         q_w, k_w, v_w = self.in_proj_weight.chunk(3, dim=0)
+         q,k,v = (x @ q_w) + q_b, (x @ k_w) + k_b, (x @ v_w) + v_b
          q,k,v = [x.reshape(B, L, self.n_heads, self.d_head).transpose(1, 2) for x in (q,k,v)]
          attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
          return self.out_proj(attn_output.transpose(1, 2).reshape(B, L, D))
+
+
+   class Mlp:
+      def __init__(self, dims, hidden_dims):
+         self.c_fc   = Linear(dims, hidden_dims)
+         self.c_proj = Linear(hidden_dims, dims)
+      
+      def __call__(self, x:Tensor) -> Tensor:
+         return x.sequential([self.c_fc, Tensor.gelu, self.c_proj])
 
 
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L210
@@ -516,20 +531,13 @@ class Open:
       def __init__(self, dims:int, n_heads:int, mlp_ratio:float):
          self.ln_1 = LayerNorm(dims)
          self.attn = Open.MultiheadAttention(dims, n_heads)
-         self.ls_1 = lambda x: x
 
          self.ln_2 = LayerNorm(dims)
-         d_mlp     = int(dims * mlp_ratio)
-         self.mlp  = [
-            Linear(dims, d_mlp),
-            Tensor.gelu,
-            Linear(d_mlp, dims),
-         ]
-         self.ls_2 = lambda x: x
+         self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
       
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-         x = x + x.sequential([self.ln_1, lambda z: self.attn(z, attn_mask), self.ls_1])
-         x = x + x.sequential([self.ln_2, self.mlp, self.ls_2])
+         x = x + x.sequential([self.ln_1, lambda z: self.attn(z, attn_mask)])
+         x = x + x.sequential([self.ln_2, self.mlp])
          return x
 
 
@@ -547,33 +555,39 @@ class Open:
          x = x.transpose(0, 1)
          return x
 
-
+   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
-      def __init__(self, ctx_length:int=77, vocab_size:int=49408, dims:int=1024, n_heads:int=16, layers:int=24):
+      def __init__(self, dims:int=1024, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=24):
          self.token_embedding = Embedding(vocab_size, dims)
          self.positional_embedding = Tensor.empty(ctx_length, dims)
          self.transformer = Open.ClipTransformer(dims, layers, n_heads)
+         self.ln_final = LayerNorm(dims)
+         self.text_projection = Tensor.empty(dims, 512)
+      
+      @property
+      def attn_mask(self) -> Tensor:
+         if not hasattr(self, "_attn_mask"):
+            self._attn_mask = Tensor.full((1, 1, 77, 77), float("-inf")).triu(1)
+         return self._attn_mask
+
+      def __call__(self, text:Tensor) -> Tensor:
+         seq_len = text.shape[1]
+
+         x = self.token_embedding(text)
+         x = x + self.positional_embedding[:seq_len]
+         x = self.transformer(x, attn_mask=self.attn_mask)
+         x = self.ln_final(x)
+
+         pooled = x[Tensor.arange(x.shape[0]), text.argmax(dim=-1)]
+         pooled = pooled @ self.text_projection
+         return pooled
 
 
-   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
-   class Clip:
-      def __init__(self):
-         self.transformer = Open.ClipTextTransformer()
-
-{
-    "embed_dim": 1024,
-   #  "text_cfg": {
-   #      "context_length": 77,
-   #      "vocab_size": 49408,
-   #      "width": 1024,
-   #      "heads": 16,
-   #      "layers": 24
-   #  }
-}
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 class FrozenOpenClipEmbedder:
-   pass
+   def __init__(self, dims:int=1024):
+      self.model = Open.ClipTextTransformer()
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
@@ -594,7 +608,7 @@ class ConcatTimestepEmbedderND:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
 class Conditioner:
    def __init__(self):
-      self.embedders = []
+      self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
 
 
 class FirstStageModel:
