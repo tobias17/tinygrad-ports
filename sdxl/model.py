@@ -9,10 +9,10 @@ from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: 
 from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
+from abc import ABC, abstractmethod
 from functools import lru_cache
 import os, math, re, gzip
 from PIL import Image # type: ignore
-from abc import ABC
 import numpy as np
 
 # configs:
@@ -195,7 +195,7 @@ class UNetModel:
       self.dropout = 0.0
       self.channel_mult = channel_mult
       self.conv_resample = True
-      self.num_classes = None
+      self.num_classes = "sequential"
       self.use_checkpoint = False
       self.d_head = d_head
 
@@ -271,6 +271,9 @@ class UNetModel:
       t_emb = timestep_embedding(tms, self.model_channels)
       emb = t_emb.sequential(self.time_embed)
 
+      assert y.shape[0] == x.shape[0]
+      emb = emb + y.sequential(self.label_emb)
+
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
          elif isinstance(bb, UNet.SpatialTransformer): x = bb(x, ctx)
@@ -293,6 +296,9 @@ class UNetModel:
 
 class Embedder(ABC):
    input_key: str
+   @abstractmethod
+   def __call__(self, x:Tensor) -> Tensor:
+      pass
 
 
 class Closed:
@@ -865,7 +871,7 @@ class Denoiser:
    def idx_to_sigma(self, idx:Union[Tensor,int]) -> Tensor:
       return self.sigmas[idx]
 
-   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict, uc:Dict) -> Tensor:
       sigma = self.idx_to_sigma(self.sigma_to_idx(sigma))
       sigma_shape = sigma.shape
       dims_to_append = len(x.shape) - len(sigma.shape)
@@ -873,7 +879,7 @@ class Denoiser:
       sigma = x[(...,) + (None,)*dims_to_append]
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
-      return model(x*c_in, c_noise, cond)*c_out + x*c_skip
+      return model(x*c_in, c_noise, cond, uc)*c_out + x*c_skip
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
@@ -896,11 +902,20 @@ class SDXL:
       return x.cast(dtypes.uint8)
 
 
-# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
+class IdentityGuider:
+   def prepare_inputs(self, x:Tensor, s:float, c:Dict, uc:Dict):
+      return x, s, { k:v for k,v in c.items() }
+
+   def __call__(self, x:Tensor, sigma:float) -> Tensor:
+      return x
+
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
 class DPMPP2MSampler:
    def __init__(self):
       self.discretization = LegacyDDPMDiscretization()
+      self.guider = IdentityGuider()
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
@@ -951,7 +966,7 @@ if __name__ == "__main__":
 
    model = SDXL(configs["SDXL_Base"])
    load_state_dict(model, state_dict, strict=False)
-
+   sampler = DPMPP2MSampler()
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
@@ -967,7 +982,6 @@ if __name__ == "__main__":
    N = 1
    C = 4
    F = 8
-
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
    batch_c : Dict = {
@@ -989,10 +1003,10 @@ if __name__ == "__main__":
    shape = (N, C, img_height // F, img_width // F)
    randn = Tensor.randn(shape)
 
-   def denoiser(x, sigma, c) -> Tensor:
-      return model.denoiser(model.model, x, sigma, c)
+   def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
+      return model.denoiser(model.model, x, sigma, c, uc)
 
-   z = dpmpp2m_sampler(denoiser, randn, c, uc, steps, cfg_scale)
+   z = sampler(denoiser, randn, c, uc, steps, cfg_scale)
    x = model.decode(z)
 
    print(x.shape)
