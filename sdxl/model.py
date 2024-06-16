@@ -902,12 +902,21 @@ class SDXL:
       return x.cast(dtypes.uint8)
 
 
-class IdentityGuider:
-   def prepare_inputs(self, x:Tensor, s:float, c:Dict, uc:Dict):
-      return x, s, { k:v for k,v in c.items() }
+class VanillaCFG:
+   def __init__(self, scale:float):
+      self.scale = scale
+
+   def prepare_inputs(self, x:Tensor, s:float, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor,Tensor]:
+      c_out = {}
+      for k in c:
+         assert k in ["vector", "crossattn", "concat"]
+         c_out[k] = Tensor.cat(uc[k], c[k], dim=0)
+      return Tensor.cat(x, x), Tensor.cat(s, s), c_out
 
    def __call__(self, x:Tensor, sigma:float) -> Tensor:
-      return x
+      x_u, x_c = x.chunk(2)
+      x_pred = x_u + self.scale*(x_c - x_u)
+      return x_pred
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
@@ -915,7 +924,7 @@ class IdentityGuider:
 class DPMPP2MSampler:
    def __init__(self):
       self.discretization = LegacyDDPMDiscretization()
-      self.guider = IdentityGuider()
+      self.guider = VanillaCFG()
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
