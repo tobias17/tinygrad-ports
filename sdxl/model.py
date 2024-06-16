@@ -233,6 +233,7 @@ class UNetModel:
             self.input_blocks.append([
                UNet.Downsample(ch),
             ])
+            input_block_channels.append(ch)
             ds *= 2
       
       n_heads = ch // d_head
@@ -572,12 +573,12 @@ class Open:
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
-      def __init__(self, dims:int=1024, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=24):
+      def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=24):
          self.token_embedding = Embedding(vocab_size, dims)
          self.positional_embedding = Tensor.empty(ctx_length, dims)
          self.transformer = Open.ClipTransformer(dims, layers, n_heads)
          self.ln_final = LayerNorm(dims)
-         self.text_projection = Tensor.empty(dims, 512)
+         self.text_projection = Tensor.empty(dims, dims)
       
       @property
       def attn_mask(self) -> Tensor:
@@ -600,8 +601,8 @@ class Open:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 class FrozenOpenClipEmbedder(Embedder):
-   def __init__(self, dims:int=1024):
-      self.model = Open.ClipTextTransformer()
+   def __init__(self, dims:int=1280):
+      self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
 
 
@@ -624,9 +625,10 @@ class ConcatTimestepEmbedderND(Embedder):
 class Conditioner:
    OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat", 5: "concat"}
    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
+   embedders: List[Embedder]
 
    def __init__(self):
-      self.embedders: List[Embedder] = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
+      self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
    
    def get_keys(self) -> Set[str]:
       return set(e.input_key for e in self.embedders)
@@ -733,7 +735,7 @@ class FirstStage:
             block = []
             block_in  = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult   [i_level]
-            for i_block in range(num_res_blocks):
+            for _ in range(num_res_blocks):
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
@@ -742,7 +744,7 @@ class FirstStage:
          
          self.mid = FirstStage.MidEntry(block_in)
 
-         self.norm_out = GroupNorm(32, in_ch)
+         self.norm_out = GroupNorm(32, block_in)
          self.conv_out = Conv2d(block_in, 2*z_ch, kernel_size=3, stride=1, padding=1)
       
       def __call__(self, x:Tensor) -> Tensor:
@@ -783,8 +785,8 @@ class FirstStage:
             upsample = lambda x: x if i_level == 0 else FirstStage.Upsample(block_in)
             self.up.insert(0, BlockEntry(block, upsample))
          
-         self.norm_out = GroupNorm(32, in_ch)
-         self.conv_out = Conv2d(block_in, 2*z_ch, kernel_size=3, stride=1, padding=1)
+         self.norm_out = GroupNorm(32, block_in)
+         self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
       
       def __call__(self, z:Tensor) -> Tensor:
          self.last_z_shape = z.shape
