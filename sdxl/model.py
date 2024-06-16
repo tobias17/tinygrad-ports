@@ -835,6 +835,11 @@ class SDXL:
       return x.cast(dtypes.uint8)
 
 
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
+def dpmpp2m_sampler(denoiser, x, c, uc, steps, cfg_scale):
+   pass
+
+
 if __name__ == "__main__":
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
    state_dict = safe_load(weight_path)
@@ -878,7 +883,7 @@ if __name__ == "__main__":
    def denoiser(x, sigma, c) -> Tensor:
       return model.denoiser(model.model, x, sigma, c)
 
-   z = sampler(denoiser, randn, c, uc)
+   z = dpmpp2m_sampler(denoiser, randn, c, uc, steps, cfg_scale)
    x = model.decode(z)
 
    print(x.shape)
