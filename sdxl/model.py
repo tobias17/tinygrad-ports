@@ -6,10 +6,9 @@
 
 from tinygrad.tensor import Tensor # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
-from tinygrad.nn.state import safe_load # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from typing import Dict, List, Union, Callable, Optional, Any
-from collections import namedtuple
+from typing import Dict, List, Union, Callable, Optional, Any, Set
 from functools import lru_cache
 import os, math, re, gzip
 
@@ -496,6 +495,7 @@ class FrozenClosedClipEmbedder:
    def __init__(self):
       self.tokenizer   = Closed.ClipTokenizer()
       self.transformer = Closed.ClipTextModel()
+      self.input_key = "txt"
 
 
 class Open:
@@ -595,6 +595,7 @@ class Open:
 class FrozenOpenClipEmbedder:
    def __init__(self, dims:int=1024):
       self.model = Open.ClipTextTransformer()
+      self.input_key = "txt"
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
@@ -616,6 +617,9 @@ class ConcatTimestepEmbedderND:
 class Conditioner:
    def __init__(self):
       self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
+   
+   def get_keys(self) -> Set[str]:
+      return set(e.input_key for e in self.embedders)
 
 
 class FirstStage:
@@ -655,9 +659,25 @@ class FirstStage:
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L204
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L17
    class AttnBlock:
-      def __init__(self, in_channels:int):
-         pass
+      def __init__(self, in_channels):
+         self.norm = GroupNorm(32, in_channels)
+         self.q = Conv2d(in_channels, in_channels, 1)
+         self.k = Conv2d(in_channels, in_channels, 1)
+         self.v = Conv2d(in_channels, in_channels, 1)
+         self.proj_out = Conv2d(in_channels, in_channels, 1)
+
+      # copied from AttnBlock in ldm repo
+      def __call__(self, x:Tensor) -> Tensor:
+         h_ = self.norm(x)
+         q,k,v = self.q(h_), self.k(h_), self.v(h_)
+
+         # compute attention
+         b,c,h,w = q.shape
+         q,k,v = [x.reshape(b,c,h*w).transpose(1,2) for x in (q,k,v)]
+         h_ = Tensor.scaled_dot_product_attention(q,k,v).transpose(1,2).reshape(b,c,h,w)
+         return x + self.proj_out(h_)
 
 
    class MidEntry:
@@ -671,8 +691,6 @@ class FirstStage:
    class Encoder:
       def __init__(self, ch:int, in_ch:int, out_ch:int, z_ch:int, ch_mult:List[int], num_res_blocks:int, resolution:int):
          self.conv_in = Conv2d(in_ch, ch, kernel_size=3, stride=1, padding=1)
-
-         curr_res = resolution
          in_ch_mult = (1,) + tuple(ch_mult)
 
          class BlockEntry:
@@ -746,7 +764,7 @@ class FirstStage:
             for block in up.block:
                h = block(h)
             h = up.upsample(h)
-         
+
          h = h.sequential([self.norm_out, Tensor.swish, self.conv_out])
          return h
 
@@ -754,15 +772,42 @@ class FirstStage:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L102
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L437
 class FirstStageModel:
-   pass
+   def __init__(self, embed_dim:int=4, **kwargs):
+      self.encoder = FirstStage.Encoder(**kwargs)
+      self.decoder = FirstStage.Decoder(**kwargs)
+      self.quant_conv = Conv2d(2*kwargs["z_ch"], 2*embed_dim, 1)
+      self.post_quant_conv = Conv2d(embed_dim, kwargs["z_ch"], 1)
+   
+   def __call__(self, x:Tensor) -> Tensor:
+      return x.sequential([self.encoder, self.quant_conv, lambda l: l[:,0:4], self.post_quant_conv, self.decoder])
 
 
 class SDXL:
    def __init__(self, config:Dict):
-      self.model = UNetModel(**config["model"])
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
+      self.model = UNetModel(**config["model"])
+
 
 if __name__ == "__main__":
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
-   d = safe_load(weight_path)
+   state_dict = safe_load(weight_path)
+
+   model = SDXL(configs["SDXL_Base"])
+   load_state_dict(model, state_dict, strict=False)
+
+   # sampling params
+   pos_prompt = "a horse sized cat eating a bagel"
+   neg_prompt = ""
+   img_width  = 1024
+   img_height = 1024
+   steps = 50
+   cfg_scale = 6.0
+   eta = 1.0
+
+   batch_c  = {}
+   batch_uc = {}
+
+
+
+
