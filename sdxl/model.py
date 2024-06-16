@@ -8,7 +8,7 @@ from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from typing import Dict, List, Union, Callable, Optional, Any, Set
+from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
 from functools import lru_cache
 import os, math, re, gzip
 from PIL import Image # type: ignore
@@ -815,6 +815,65 @@ class FirstStageModel:
       return x.sequential([self.encoder, self.quant_conv, lambda l: l[:,0:4], self.post_quant_conv, self.decoder])
 
 
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/discretizer.py#L42
+class LegacyDDPMDiscretization:
+   def __init__(self, linear_start:float=0.00085, linear_end:float=0.0120, num_timesteps:int=1000):
+      self.num_timesteps = num_timesteps
+      betas = np.linspace(linear_start**0.5, linear_end**0.5, num_timesteps, dtype=np.float32) ** 2
+      alphas = 1.0 - betas
+      self.alphas_cumprod = np.cumprod(alphas, axis=0)
+
+   def __call__(self, n:int) -> Tensor:
+      if n < self.num_timesteps:
+         timesteps = np.linspace(self.num_timesteps - 1, 0, n, endpoint=False).astype(int)[::-1]
+         alphas_cumprod = self.alphas_cumprod[timesteps]
+      elif n == self.num_timesteps:
+         alphas_cumprod = self.alphas_cumprod
+      sigmas = Tensor((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
+      sigmas = sigmas.flip((0,)).cat(Tensor.ones((1,)))
+      return sigmas
+
+
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
+class Denoiser:
+   _sigmas = None
+   def __init__(self, num_idx:int=1000):
+      self.discretization = LegacyDDPMDiscretization()
+      self.scaling = Denoiser.eps_scaling
+      self.num_idx = num_idx
+   
+   @staticmethod
+   def eps_scaling(sigma:Tensor) -> Tuple[Tensor,Tensor,Tensor,Tensor]:
+      c_skip  = Tensor.ones_like(sigma)
+      c_out   = -sigma
+      c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+      c_noise = sigma
+      return c_skip, c_out, c_in, c_noise
+
+   @property
+   def sigmas(self) -> Tensor:
+      if self._sigmas is None:
+         self._sigmas = self.discretization(self.num_idx)
+      return self._sigmas
+
+   def sigma_to_idx(self, sigma:Tensor) -> Tensor:
+      dists = sigma - self.sigmas[:, None]
+      return dists.abs().argmin(dim=0).view(sigma.shape)
+
+   def idx_to_sigma(self, idx:Union[Tensor,int]) -> Tensor:
+      return self.sigmas[idx]
+
+   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+      sigma = self.idx_to_sigma(self.sigma_to_idx(sigma))
+      sigma_shape = sigma.shape
+      dims_to_append = len(x.shape) - len(sigma.shape)
+      assert dims_to_append >= 0
+      sigma = x[(...,) + (None,)*dims_to_append]
+      c_skip, c_out, c_in, c_noise = self.scaling(sigma)
+      c_noise = self.sigma_to_idx(c_noise)
+      return model(x*c_in, c_noise, cond)*c_out + x*c_skip
+
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
    scale_factor: float = 0.13025
@@ -823,9 +882,7 @@ class SDXL:
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
       self.model = UNetModel(**config["model"])
-   
-   def denoiser(model, x:Tensor, sigma, c) -> Tensor:
-      pass
+      self.denoiser = None
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
@@ -838,6 +895,11 @@ class SDXL:
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
+class DPMPP2MSampler:
+   def __init__(self):
+      pass
+
 def dpmpp2m_sampler(denoiser, x, c, uc, steps, cfg_scale):
    pass
 
@@ -848,6 +910,7 @@ if __name__ == "__main__":
 
    model = SDXL(configs["SDXL_Base"])
    load_state_dict(model, state_dict, strict=False)
+
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
@@ -864,7 +927,8 @@ if __name__ == "__main__":
    C = 4
    F = 8
 
-   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
    batch_c : Dict = {
       "txt": np.array([pos_prompt]).repeat(N,1),
       "original_size_as_tuple": Tensor((img_height,img_width)).repeat(N,1),
@@ -879,6 +943,8 @@ if __name__ == "__main__":
    }
    c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
 
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
    shape = (N, C, img_height // F, img_width // F)
    randn = Tensor.randn(shape)
 
