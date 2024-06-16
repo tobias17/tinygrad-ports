@@ -23,11 +23,13 @@ configs: Dict = {
       "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
       "conditioner": {},
       "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
+      "denoiser": {"num_idx": 1000},
    },
    "SDXL_Refiner": {
       "model": {"adm_in_channels": 2560, "in_channels": 4, "out_channels": 4, "model_channels": 384, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4, 4], "d_head": 64, "transformer_depth": [4, 4, 4, 4], "ctx_dim": [1280, 1280, 1280, 1280]},
       "conditioner": {},
       "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
+      "denoiser": {"num_idx": 1000},
    }
 }
 
@@ -836,8 +838,7 @@ class LegacyDDPMDiscretization:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
 class Denoiser:
-   _sigmas = None
-   def __init__(self, num_idx:int=1000):
+   def __init__(self, num_idx:int):
       self.discretization = LegacyDDPMDiscretization()
       self.scaling = Denoiser.eps_scaling
       self.num_idx = num_idx
@@ -850,6 +851,7 @@ class Denoiser:
       c_noise = sigma
       return c_skip, c_out, c_in, c_noise
 
+   _sigmas = None
    @property
    def sigmas(self) -> Tensor:
       if self._sigmas is None:
@@ -870,7 +872,7 @@ class Denoiser:
       assert dims_to_append >= 0
       sigma = x[(...,) + (None,)*dims_to_append]
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
-      c_noise = self.sigma_to_idx(c_noise)
+      c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
       return model(x*c_in, c_noise, cond)*c_out + x*c_skip
 
 
@@ -882,7 +884,7 @@ class SDXL:
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
       self.model = UNetModel(**config["model"])
-      self.denoiser = None
+      self.denoiser = Denoiser(**config["denoiser"])
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
@@ -898,10 +900,49 @@ class SDXL:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
 class DPMPP2MSampler:
    def __init__(self):
-      pass
+      self.discretization = LegacyDDPMDiscretization()
 
-def dpmpp2m_sampler(denoiser, x, c, uc, steps, cfg_scale):
-   pass
+   def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
+      denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
+      denoised = self.guider(denoised, sigma)
+
+      t, t_next = sigma.log().neg(), next_sigma.log().neg()
+      h = t_next - t
+      r = None if prev_sigma is None else (t - prev_sigma.log().neg()) / h
+
+      mults = [t_next.neg().exp()/t.neg().exp(), (-h).exp().sub(1)]
+      if r is not None:
+         mults.extend([1 + 1/(2*r), 1/(2*r)])
+      mults = [m[(...,) + (None,)*(len(x.shape)-len(m.shape))] for m in mults]
+
+      x_standard = mults[0]*x - mults[1]*denoised
+      if old_denoised is None or next_sigma.sum() < 1e-14:
+         return x_standard, denoised
+      
+      denoised_d = mults[2]*denoised - mults[3]*old_denoised
+      x_advanced = mults[0]*x        - mults[1]*denoised_d
+      x = Tensor.where(next_sigma[(...,) + (None,)*(len(x.shape)-len(next_sigma))] > 0.0, x_advanced, x_standard)
+      return x, denoised
+
+   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int, cfg_scale:float) -> Tensor:
+      sigmas = self.discretization(num_steps)
+      x *= Tensor.sqrt(1.0 + sigmas[0] ** 2.0)
+      num_sigmas = len(sigmas)
+      s_in = Tensor.ones([x.shape[0]])
+
+      old_denoised = None
+      for i in range(num_sigmas - 1):
+         x, old_denoised = self.sampler_step(
+            old_denoised=old_denoised,
+            prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
+            sigma=(s_in*sigmas[i]),
+            next_sigma=(s_in*sigmas[i+1]),
+            denoiser=denoiser,
+            x=x,
+            c=c,
+            uc=uc,
+         )
+      return x
 
 
 if __name__ == "__main__":
