@@ -4,13 +4,16 @@
 # Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE
 # mlfoundations/open_clip        | MIT     | https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/LICENSE
 
-from tinygrad.tensor import Tensor # type: ignore
+from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any, Set
 from functools import lru_cache
 import os, math, re, gzip
+from PIL import Image # type: ignore
+from abc import ABC
+import numpy as np
 
 # configs:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
@@ -285,6 +288,10 @@ class UNetModel:
       return x.sequential(self.out)
 
 
+class Embedder(ABC):
+   input_key: str
+
+
 class Closed:
    """
    Namespace for OpenAI CLIP model components.
@@ -491,7 +498,7 @@ class Closed:
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
-class FrozenClosedClipEmbedder:
+class FrozenClosedClipEmbedder(Embedder):
    def __init__(self):
       self.tokenizer   = Closed.ClipTokenizer()
       self.transformer = Closed.ClipTextModel()
@@ -592,14 +599,14 @@ class Open:
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
-class FrozenOpenClipEmbedder:
+class FrozenOpenClipEmbedder(Embedder):
    def __init__(self, dims:int=1024):
       self.model = Open.ClipTextTransformer()
       self.input_key = "txt"
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
-class ConcatTimestepEmbedderND:
+class ConcatTimestepEmbedderND(Embedder):
    def __init__(self, outdim:int, input_key:str):
       self.outdim = outdim
       self.input_key = input_key
@@ -615,11 +622,35 @@ class ConcatTimestepEmbedderND:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
 class Conditioner:
+   OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat", 5: "concat"}
+   KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
+
    def __init__(self):
-      self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
+      self.embedders: List[Embedder] = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
    
    def get_keys(self) -> Set[str]:
       return set(e.input_key for e in self.embedders)
+   
+   def __call__(self, batch:Dict) -> Dict[str,Tensor]:
+      output: Dict[str,Tensor] = {}
+
+      for embedder in self.embedders:
+         with Tensor.no_grad():
+            emb_out = embedder(batch[embedder.input_key])
+
+         if isinstance(emb_out, Tensor):
+            emb_out = [emb_out]
+         else:
+            assert isinstance(emb_out, (list, tuple))
+
+         for emb in emb_out:
+            out_key = self.OUTPUT_DIM2KEYS[len(emb.shape)]
+            if out_key in output:
+               output[out_key] = output[out_key].cat(emb, dim=self.KEY2CATDIM[out_key])
+            else:
+               output[out_key] = emb
+
+      return output
 
 
 class FirstStage:
@@ -782,11 +813,26 @@ class FirstStageModel:
       return x.sequential([self.encoder, self.quant_conv, lambda l: l[:,0:4], self.post_quant_conv, self.decoder])
 
 
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
+   scale_factor: float = 0.13025
+
    def __init__(self, config:Dict):
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
       self.model = UNetModel(**config["model"])
+   
+   def denoiser(model, x:Tensor, sigma, c) -> Tensor:
+      pass
+
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
+   def decode(self, x:Tensor) -> Tensor:
+      x = self.first_stage_model(1.0/self.scale_factor * x)
+
+      # make image correct size and scale
+      x = (x + 1.0) / 2.0
+      x = x.reshape(3,512,512).permute(1,2,0).clip(0,1)*255
+      return x.cast(dtypes.uint8)
 
 
 if __name__ == "__main__":
@@ -797,6 +843,7 @@ if __name__ == "__main__":
    load_state_dict(model, state_dict, strict=False)
 
    # sampling params
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
    neg_prompt = ""
    img_width  = 1024
@@ -804,9 +851,40 @@ if __name__ == "__main__":
    steps = 50
    cfg_scale = 6.0
    eta = 1.0
+   aesthetic_score = 5.0
 
-   batch_c  = {}
-   batch_uc = {}
+   N = 1
+   C = 4
+   F = 8
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py
+   batch_c : Dict = {
+      "txt": np.array([pos_prompt]).repeat(N,1),
+      "original_size_as_tuple": Tensor((img_height,img_width)).repeat(N,1),
+      "crop_coords_top_left": Tensor((0,0)).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   }
+   batch_uc: Dict = {
+      "txt": np.array([neg_prompt]).repeat(N,1),
+      "original_size_as_tuple": Tensor((img_height,img_width)).repeat(N,1),
+      "crop_coords_top_left": Tensor((0,0)).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   }
+   c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+
+   shape = (N, C, img_height // F, img_width // F)
+   randn = Tensor.randn(shape)
+
+   def denoiser(x, sigma, c) -> Tensor:
+      return model.denoiser(model.model, x, sigma, c)
+
+   z = sampler(denoiser, randn, c, uc)
+   x = model.decode(z)
+
+   print(x.shape)
+   
+   im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
+   im.show()
 
 
 
