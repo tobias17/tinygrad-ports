@@ -496,7 +496,7 @@ class Closed:
          self.final_layer_norm = LayerNorm(768)
          self.layer_run_count  = layer_run_count
 
-      def __call__(self, input_ids):
+      def __call__(self, input_ids:Tensor) -> Tensor:
          x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
          x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
          return self.final_layer_norm(x) if self.layer_run_count is None else x
@@ -512,6 +512,10 @@ class FrozenClosedClipEmbedder(Embedder):
       self.tokenizer   = Closed.ClipTokenizer()
       self.transformer = Closed.ClipTextModel()
       self.input_key = "txt"
+   
+   def __call__(self, text:Tensor) -> Tensor:
+      tokens = self.tokenizer.encode(text)
+      return self.transformer(tokens)
 
 
 class Open:
@@ -605,13 +609,34 @@ class Open:
          pooled = x[Tensor.arange(x.shape[0]), text.argmax(dim=-1)]
          pooled = pooled @ self.text_projection
          return pooled
+   
+   def tokenize(text:Tensor) -> Tensor:
+      pass # FIXME
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 class FrozenOpenClipEmbedder(Embedder):
+   # layer = "penultimate"
+   # always_return_pooled = True
    def __init__(self, dims:int=1280):
       self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
+      self.layer_idx = 1
+   
+   def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
+      for i, r in enumerate(self.model.transformer.resblocks):
+         if i == len(self.model.transformer.resblocks) - self.layer_idx:
+            break
+         x = r(x, attn_mask=attn_mask)
+      return x
+
+   def __call__(self, text:Tensor) -> Tensor:
+      tokens: Tensor = Open.tokenize(text)
+
+      x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
+      x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask).permute(1,0,2)
+      x = self.model.ln_final(x)
+      return x
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
@@ -645,8 +670,7 @@ class Conditioner:
       output: Dict[str,Tensor] = {}
 
       for embedder in self.embedders:
-         with Tensor.no_grad():
-            emb_out = embedder(batch[embedder.input_key])
+         emb_out = embedder(batch[embedder.input_key])
 
          if isinstance(emb_out, Tensor):
             emb_out = [emb_out]
@@ -922,9 +946,9 @@ class VanillaCFG:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
 class DPMPP2MSampler:
-   def __init__(self):
+   def __init__(self, cfg_scale:float):
       self.discretization = LegacyDDPMDiscretization()
-      self.guider = VanillaCFG()
+      self.guider = VanillaCFG(cfg_scale)
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
@@ -970,13 +994,13 @@ class DPMPP2MSampler:
 
 
 if __name__ == "__main__":
+   Tensor.no_grad = True
+
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
    state_dict = safe_load(weight_path)
 
    model = SDXL(configs["SDXL_Base"])
    load_state_dict(model, state_dict, strict=False)
-   sampler = DPMPP2MSampler()
-
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
@@ -994,15 +1018,15 @@ if __name__ == "__main__":
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
    batch_c : Dict = {
-      "txt": np.array([pos_prompt]).repeat(N,1),
-      "original_size_as_tuple": Tensor((img_height,img_width)).repeat(N,1),
-      "crop_coords_top_left": Tensor((0,0)).repeat(N,1),
+      "txt": np.array([pos_prompt]).repeat(N),
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
    batch_uc: Dict = {
-      "txt": np.array([neg_prompt]).repeat(N,1),
-      "original_size_as_tuple": Tensor((img_height,img_width)).repeat(N,1),
-      "crop_coords_top_left": Tensor((0,0)).repeat(N,1),
+      "txt": np.array([neg_prompt]).repeat(N),
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
    c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
@@ -1015,6 +1039,7 @@ if __name__ == "__main__":
    def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
       return model.denoiser(model.model, x, sigma, c, uc)
 
+   sampler = DPMPP2MSampler(cfg_scale)
    z = sampler(denoiser, randn, c, uc, steps, cfg_scale)
    x = model.decode(z)
 
