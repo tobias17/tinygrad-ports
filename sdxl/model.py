@@ -21,13 +21,13 @@ import numpy as np
 configs: Dict = {
    "SDXL_Base": {
       "model": {"adm_in_channels": 2816, "in_channels": 4, "out_channels": 4, "model_channels": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048},
-      "conditioner": {},
+      "conditioner": {"concat_embedders": ["original_size_as_tuple", "crop_coords_top_left", "target_size_as_tuple"]},
       "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
       "denoiser": {"num_idx": 1000},
    },
    "SDXL_Refiner": {
       "model": {"adm_in_channels": 2560, "in_channels": 4, "out_channels": 4, "model_channels": 384, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4, 4], "d_head": 64, "transformer_depth": [4, 4, 4, 4], "ctx_dim": [1280, 1280, 1280, 1280]},
-      "conditioner": {},
+      "conditioner": {"concat_embedders": ["original_size_as_tuple", "crop_coords_top_left", "aesthetic_score"]},
       "first_stage_model": {"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256},
       "denoiser": {"num_idx": 1000},
    }
@@ -636,7 +636,6 @@ class FrozenOpenClipEmbedder(Embedder):
 
    def __call__(self, text:Tensor) -> Tensor:
       tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
-
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask).permute(1,0,2)
       x = self.model.ln_final(x)
@@ -664,8 +663,13 @@ class Conditioner:
    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
    embedders: List[Embedder]
 
-   def __init__(self):
-      self.embedders = [FrozenClosedClipEmbedder(), FrozenOpenClipEmbedder()]
+   def __init__(self, concat_embedders:List[str]):
+      self.embedders = [
+         FrozenClosedClipEmbedder(),
+         FrozenOpenClipEmbedder(),
+      ]
+      for input_key in concat_embedders:
+         self.embedders.append(ConcatTimestepEmbedderND(256, input_key))
    
    def get_keys(self) -> Set[str]:
       return set(e.input_key for e in self.embedders)
@@ -1031,12 +1035,14 @@ if __name__ == "__main__":
       "txt": pos_prompt,
       "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
    batch_uc: Dict = {
       "txt": neg_prompt,
       "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
    print("starting batch creation")
