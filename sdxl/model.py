@@ -385,12 +385,12 @@ class Closed:
                   new_word.extend(word[i:])
                   break
 
-            if word[i] == first and i < len(word)-1 and word[i+1] == second:
-               new_word.append(first+second)
-               i += 2
-            else:
-               new_word.append(word[i])
-               i += 1
+               if word[i] == first and i < len(word)-1 and word[i+1] == second:
+                  new_word.append(first+second)
+                  i += 2
+               else:
+                  new_word.append(word[i])
+                  i += 1
             new_word = tuple(new_word)
             word = new_word
             if len(word) == 1:
@@ -515,7 +515,7 @@ class FrozenClosedClipEmbedder(Embedder):
    
    def __call__(self, text:Tensor) -> Tensor:
       tokens = self.tokenizer.encode(text)
-      return self.transformer(tokens)
+      return self.transformer.text_model(tokens)
 
 
 class Open:
@@ -609,9 +609,6 @@ class Open:
          pooled = x[Tensor.arange(x.shape[0]), text.argmax(dim=-1)]
          pooled = pooled @ self.text_projection
          return pooled
-   
-   def tokenize(text:Tensor) -> Tensor:
-      pass # FIXME
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
@@ -622,6 +619,7 @@ class FrozenOpenClipEmbedder(Embedder):
       self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
       self.layer_idx = 1
+      self.tokenizer = Closed.ClipTokenizer()
    
    def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
       for i, r in enumerate(self.model.transformer.resblocks):
@@ -631,7 +629,7 @@ class FrozenOpenClipEmbedder(Embedder):
       return x
 
    def __call__(self, text:Tensor) -> Tensor:
-      tokens: Tensor = Open.tokenize(text)
+      tokens: Tensor = self.tokenizer.encode(text)
 
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask).permute(1,0,2)
@@ -1001,6 +999,8 @@ if __name__ == "__main__":
 
    model = SDXL(configs["SDXL_Base"])
    load_state_dict(model, state_dict, strict=False)
+   print("loaded state dict")
+
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
@@ -1018,18 +1018,20 @@ if __name__ == "__main__":
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
    batch_c : Dict = {
-      "txt": np.array([pos_prompt]).repeat(N),
+      "txt": pos_prompt,
       "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
    batch_uc: Dict = {
-      "txt": np.array([neg_prompt]).repeat(N),
+      "txt": neg_prompt,
       "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
+   print("starting batch creation")
    c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+   print("created batches")
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
@@ -1041,7 +1043,9 @@ if __name__ == "__main__":
 
    sampler = DPMPP2MSampler(cfg_scale)
    z = sampler(denoiser, randn, c, uc, steps, cfg_scale)
+   print("created samples")
    x = model.decode(z)
+   print("decoded samples")
 
    print(x.shape)
    
