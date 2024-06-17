@@ -69,10 +69,10 @@ class UNet:
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L163
    class CrossAttention:
-      def __init__(self, query_dim, context_dim, n_heads, d_head):
+      def __init__(self, query_dim:int, ctx_dim:int, n_heads:int, d_head:int):
          self.to_q = Linear(query_dim, n_heads*d_head, bias=False)
-         self.to_k = Linear(context_dim, n_heads*d_head, bias=False)
-         self.to_v = Linear(context_dim, n_heads*d_head, bias=False)
+         self.to_k = Linear(ctx_dim,   n_heads*d_head, bias=False)
+         self.to_v = Linear(ctx_dim,   n_heads*d_head, bias=False)
          self.num_heads = n_heads
          self.head_size = d_head
          self.to_out = [Linear(n_heads*d_head, query_dim)]
@@ -114,7 +114,7 @@ class UNet:
    class BasicTransformerBlock:
       def __init__(self, dim:int, ctx_dim:int, n_heads:int, d_head:int):
          self.attn1 = UNet.CrossAttention(dim, dim, n_heads, d_head)
-         self.ff = UNet.FeedForward(dim)
+         self.ff    = UNet.FeedForward(dim)
          self.attn2 = UNet.CrossAttention(dim, ctx_dim, n_heads, d_head)
          self.norm1 = LayerNorm(dim)
          self.norm2 = LayerNorm(dim)
@@ -174,12 +174,13 @@ class UNet:
          return self.conv(x)
 
 
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/util.py#L207
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L251
 def timestep_embedding(timesteps, dim, max_period=10000):
    half = dim // 2
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
-   args = timesteps * freqs
-   return Tensor.cat(args.cos(), args.sin()).reshape(1, -1)
+   args = timesteps[:, None] * freqs[None]
+   return Tensor.cat(args.cos(), args.sin(), dim=-1)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
@@ -267,7 +268,13 @@ class UNetModel:
          Conv2d(self.out_channels, self.out_channels, 3, padding=1),
       ]
 
-   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
+   def __call__(self, x:Tensor, tms:Tensor, c:Dict, y:Tensor) -> Tensor:
+      ctx = c.get("crossattn", None)
+      y   = c.get("vector", None)
+      cat = c.get("concat", None)
+      if cat is not None:
+         x = x.cat(cat, dim=1)
+
       t_emb = timestep_embedding(tms, self.model_channels)
       emb = t_emb.sequential(self.time_embed)
 
@@ -515,7 +522,7 @@ class FrozenClosedClipEmbedder(Embedder):
    
    def __call__(self, text:Tensor) -> Tensor:
       tokens = self.tokenizer.encode(text)
-      return self.transformer.text_model(tokens)
+      return self.transformer.text_model(Tensor(tokens).reshape(1,-1))
 
 
 class Open:
@@ -534,13 +541,12 @@ class Open:
          self.out_proj = Linear(dims, dims)
 
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-         B,L,D = x.shape
          q_b, k_b, v_b = self.in_proj_bias  .chunk(3, dim=0)
          q_w, k_w, v_w = self.in_proj_weight.chunk(3, dim=0)
-         q,k,v = (x @ q_w) + q_b, (x @ k_w) + k_b, (x @ v_w) + v_b
-         q,k,v = [x.reshape(B, L, self.n_heads, self.d_head).transpose(1, 2) for x in (q,k,v)]
+         q,k,v = x.linear(q_w.transpose(), q_b), x.linear(k_w.transpose(), k_b), x.linear(v_w.transpose(), v_b)
+         q,k,v = [y.reshape(x.shape[0], -1, self.n_heads, self.d_head).transpose(0, 2) for y in (q,k,v)]
          attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-         return self.out_proj(attn_output.transpose(1, 2).reshape(B, L, D))
+         return self.out_proj(attn_output.transpose(0, 2).reshape(x.shape))
 
 
    class Mlp:
@@ -595,7 +601,7 @@ class Open:
       @property
       def attn_mask(self) -> Tensor:
          if not hasattr(self, "_attn_mask"):
-            self._attn_mask = Tensor.full((1, 1, 77, 77), float("-inf")).triu(1)
+            self._attn_mask = Tensor.full((77, 77), float("-inf")).triu(1)
          return self._attn_mask
 
       def __call__(self, text:Tensor) -> Tensor:
@@ -629,7 +635,7 @@ class FrozenOpenClipEmbedder(Embedder):
       return x
 
    def __call__(self, text:Tensor) -> Tensor:
-      tokens: Tensor = self.tokenizer.encode(text)
+      tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
 
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask).permute(1,0,2)
@@ -864,6 +870,12 @@ class LegacyDDPMDiscretization:
       return sigmas
 
 
+def expand_dims(x:Tensor, t:Tensor) -> Tensor:
+   dims_to_append = len(t.shape) - len(x.shape)
+   assert dims_to_append >= 0
+   return x.reshape(x.shape + (1,)*dims_to_append)
+
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
 class Denoiser:
    def __init__(self, num_idx:int):
@@ -888,7 +900,7 @@ class Denoiser:
 
    def sigma_to_idx(self, sigma:Tensor) -> Tensor:
       dists = sigma - self.sigmas[:, None]
-      return dists.abs().argmin(dim=0).view(sigma.shape)
+      return dists.abs().argmin(axis=0).view(*sigma.shape)
 
    def idx_to_sigma(self, idx:Union[Tensor,int]) -> Tensor:
       return self.sigmas[idx]
@@ -896,9 +908,7 @@ class Denoiser:
    def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict, uc:Dict) -> Tensor:
       sigma = self.idx_to_sigma(self.sigma_to_idx(sigma))
       sigma_shape = sigma.shape
-      dims_to_append = len(x.shape) - len(sigma.shape)
-      assert dims_to_append >= 0
-      sigma = x[(...,) + (None,)*dims_to_append]
+      sigma = expand_dims(sigma, x)
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
       return model(x*c_in, c_noise, cond, uc)*c_out + x*c_skip
@@ -959,7 +969,7 @@ class DPMPP2MSampler:
       mults = [t_next.neg().exp()/t.neg().exp(), (-h).exp().sub(1)]
       if r is not None:
          mults.extend([1 + 1/(2*r), 1/(2*r)])
-      mults = [m[(...,) + (None,)*(len(x.shape)-len(m.shape))] for m in mults]
+      mults = [expand_dims(m, x) for m in mults]
 
       x_standard = mults[0]*x - mults[1]*denoised
       if old_denoised is None or next_sigma.sum() < 1e-14:
@@ -967,7 +977,7 @@ class DPMPP2MSampler:
       
       denoised_d = mults[2]*denoised - mults[3]*old_denoised
       x_advanced = mults[0]*x        - mults[1]*denoised_d
-      x = Tensor.where(next_sigma[(...,) + (None,)*(len(x.shape)-len(next_sigma))] > 0.0, x_advanced, x_standard)
+      x = Tensor.where(expand_dims(next_sigma, x) > 0.0, x_advanced, x_standard)
       return x, denoised
 
    def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int, cfg_scale:float) -> Tensor:
