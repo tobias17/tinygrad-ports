@@ -12,6 +12,7 @@ from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
 from abc import ABC, abstractmethod
 from functools import lru_cache
 import os, math, re, gzip
+from tqdm import trange
 from PIL import Image # type: ignore
 import numpy as np
 
@@ -120,9 +121,9 @@ class UNet:
          self.norm2 = LayerNorm(dim)
          self.norm3 = LayerNorm(dim)
 
-      def __call__(self, x, context=None):
+      def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
          x = self.attn1(self.norm1(x)) + x
-         x = self.attn2(self.norm2(x), context=context) + x
+         x = self.attn2(self.norm2(x), ctx=ctx) + x
          x = self.ff(self.norm3(x)) + x
          return x
 
@@ -141,14 +142,14 @@ class UNet:
          self.transformer_blocks = [UNet.BasicTransformerBlock(channels, ctx_dim[d], n_heads, d_head) for d in range(depth)]
          self.proj_out = Linear(n_heads * d_head, channels)
 
-      def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
+      def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
          b, c, h, w = x.shape
          x_in = x
          x = self.norm(x)
          x = x.reshape(b, c, h*w).permute(0,2,1)
          x = self.proj_in(x)
          for block in self.transformer_blocks:
-            x = block(x, context=context)
+            x = block(x, ctx=ctx)
          x = self.proj_out(x)
          x = x.permute(0,2,1).reshape(b, c, h, w)
          return x + x_in
@@ -170,8 +171,8 @@ class UNet:
 
       def __call__(self, x:Tensor) -> Tensor:
          bs,c,py,px = x.shape
-         x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
-         return self.conv(x)
+         z = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, 2, px, 2).reshape(bs, c, py*2, px*2)
+         return self.conv(z)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/util.py#L207
@@ -253,6 +254,7 @@ class UNetModel:
             layers = [
                UNet.ResBlock(ch + ich, time_embed_dim, model_channels*mult),
             ]
+            ch = model_channels * mult
             
             if ds in attention_resolutions:
                n_heads = ch // d_head
@@ -265,7 +267,7 @@ class UNetModel:
       self.out = [
          GroupNorm(32, ch),
          Tensor.silu,
-         Conv2d(self.out_channels, self.out_channels, 3, padding=1),
+         Conv2d(model_channels, out_channels, 3, padding=1),
       ]
 
    def __call__(self, x:Tensor, tms:Tensor, c:Dict, y:Tensor) -> Tensor:
@@ -640,7 +642,7 @@ class FrozenOpenClipEmbedder(Embedder):
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
       x = self.model.ln_final(x)
-      pooled = x[Tensor.arange(x.shape[0], tokens.argmax(axis=-1).numpy().item())] @ self.model.text_projection
+      pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
 
       return pooled, penultimate
 
@@ -705,11 +707,19 @@ class FirstStage:
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L94
    class ResnetBlock:
-      def __init__(self, in_dim, out_dim):
-         pass
+      def __init__(self, in_dim:Tensor, out_dim:Optional[Tensor]=None):
+         out_dim = out_dim if out_dim is not None else in_dim
+
+         self.norm1 = GroupNorm(32, in_dim)
+         self.conv1 = Conv2d(in_dim, out_dim, 3, stride=1, padding=1)
+         self.norm2 = GroupNorm(32, out_dim)
+         self.conv2 = Conv2d(out_dim, out_dim, 3, stride=1, padding=1)
+         self.nin_shortcut = lambda x: x if in_dim == out_dim else Conv2d(in_dim, out_dim, 1, stride=1, padding=0)
       
       def __call__(self, x:Tensor) -> Tensor:
-         return x # FIXME
+         h = x.sequential([self.norm1, Tensor.swish, self.conv1])
+         h = h.sequential([self.norm2, Tensor.swish, self.conv2])
+         return self.nin_shortcut(x) + h
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L74
@@ -758,9 +768,9 @@ class FirstStage:
 
    class MidEntry:
       def __init__(self, block_in:int):
-         self.block_1 = FirstStage.ResnetBlock(block_in, block_in),
-         self.attn_1  = FirstStage.AttnBlock  (block_in),
-         self.block_2 = FirstStage.ResnetBlock(block_in, block_in),
+         self.block_1 = FirstStage.ResnetBlock(block_in)
+         self.attn_1  = FirstStage.AttnBlock  (block_in)
+         self.block_2 = FirstStage.ResnetBlock(block_in)
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L487
@@ -832,8 +842,7 @@ class FirstStage:
          self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
       
       def __call__(self, z:Tensor) -> Tensor:
-         self.last_z_shape = z.shape
-         
+
          h = z.sequential([self.conv_in, self.mid.block_1, self.mid.attn_1, self.mid.block_2])
          
          for up in self.up:
@@ -847,6 +856,7 @@ class FirstStage:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L102
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L437
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/autoencoder.py#L508
 class FirstStageModel:
    def __init__(self, embed_dim:int=4, **kwargs):
       self.encoder = FirstStage.Encoder(**kwargs)
@@ -933,7 +943,7 @@ class SDXL:
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
-      x = self.first_stage_model(1.0/self.scale_factor * x)
+      x = self.first_stage_model.decoder(1.0/self.scale_factor * x)
 
       # make image correct size and scale
       x = (x + 1.0) / 2.0
@@ -979,7 +989,7 @@ class DPMPP2MSampler:
       mults = [expand_dims(m, x) for m in mults]
 
       x_standard = mults[0]*x - mults[1]*denoised
-      if old_denoised is None or next_sigma.sum() < 1e-14:
+      if (old_denoised is None) or (next_sigma.sum() < 1e-14).item():
          return x_standard, denoised
       
       denoised_d = mults[2]*denoised - mults[3]*old_denoised
@@ -994,7 +1004,7 @@ class DPMPP2MSampler:
       s_in = Tensor.ones([x.shape[0]])
 
       old_denoised = None
-      for i in range(num_sigmas - 1):
+      for i in trange(num_sigmas - 1):
          x, old_denoised = self.sampler_step(
             old_denoised=old_denoised,
             prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
@@ -1015,7 +1025,7 @@ if __name__ == "__main__":
    state_dict = safe_load(weight_path)
 
    model = SDXL(configs["SDXL_Base"])
-   load_state_dict(model, state_dict, strict=False)
+   load_state_dict(model, state_dict, strict=True)
    print("loaded state dict")
 
    # sampling params
@@ -1024,7 +1034,7 @@ if __name__ == "__main__":
    neg_prompt = ""
    img_width  = 1024
    img_height = 1024
-   steps = 50
+   steps = 5
    cfg_scale = 6.0
    eta = 1.0
    aesthetic_score = 5.0
