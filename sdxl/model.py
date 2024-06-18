@@ -58,7 +58,7 @@ class UNet:
             lambda x: x,  # needed for weights loading code to work
             Conv2d(out_channels, out_channels, 3, padding=1),
          ]
-         self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else lambda x: x
+         self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else (lambda x: x)
 
       def __call__(self, x:Tensor, emb:Tensor) -> Tensor:
          h = x.sequential(self.in_layers)
@@ -725,8 +725,8 @@ class FirstStage:
          self.conv1 = Conv2d(in_dim, out_dim, 3, stride=1, padding=1)
          self.norm2 = GroupNorm(32, out_dim)
          self.conv2 = Conv2d(out_dim, out_dim, 3, stride=1, padding=1)
-         self.nin_shortcut = lambda x: x if in_dim == out_dim else Conv2d(in_dim, out_dim, 1, stride=1, padding=0)
-      
+         self.nin_shortcut = (lambda x: x) if in_dim == out_dim else Conv2d(in_dim, out_dim, 1, stride=1, padding=0)
+
       def __call__(self, x:Tensor) -> Tensor:
          h = x.sequential([self.norm1, Tensor.swish, self.conv1])
          h = h.sequential([self.norm2, Tensor.swish, self.conv2])
@@ -791,7 +791,7 @@ class FirstStage:
          in_ch_mult = (1,) + tuple(ch_mult)
 
          class BlockEntry:
-            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Tensor],Tensor]):
+            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Any],Any]):
                self.block = block
                self.downsample = downsample
          self.down: List[BlockEntry] = []
@@ -803,7 +803,7 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            downsample = lambda x: x if i_level == len(ch_mult)-1 else FirstStage.Downsample(block_in)
+            downsample = (lambda x: x) if (i_level == len(ch_mult)-1) else FirstStage.Downsample(block_in)
             self.down.append(BlockEntry(block, downsample))
          
          self.mid = FirstStage.MidEntry(block_in)
@@ -835,7 +835,7 @@ class FirstStage:
          self.mid = FirstStage.MidEntry(block_in)
 
          class BlockEntry:
-            def __init__(self, block:List[FirstStage.ResnetBlock], upsample:Callable[[Tensor],Tensor]):
+            def __init__(self, block:List[FirstStage.ResnetBlock], upsample:Callable[[Any],Any]):
                self.block = block
                self.upsample = upsample
          self.up: List[BlockEntry] = []
@@ -846,7 +846,7 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            upsample = lambda x: x if i_level == 0 else FirstStage.Upsample(block_in)
+            upsample = (lambda x: x) if i_level == 0 else FirstStage.Upsample(block_in)
             self.up.insert(0, BlockEntry(block, upsample))
          
          self.norm_out = GroupNorm(32, block_in)
@@ -855,8 +855,8 @@ class FirstStage:
       def __call__(self, z:Tensor) -> Tensor:
 
          h = z.sequential([self.conv_in, self.mid.block_1, self.mid.attn_1, self.mid.block_2])
-         
-         for up in self.up:
+
+         for up in self.up[::-1]:
             for block in up.block:
                h = block(h)
             h = up.upsample(h)
@@ -874,9 +874,11 @@ class FirstStageModel:
       self.decoder = FirstStage.Decoder(**kwargs)
       self.quant_conv = Conv2d(2*kwargs["z_ch"], 2*embed_dim, 1)
       self.post_quant_conv = Conv2d(embed_dim, kwargs["z_ch"], 1)
-   
-   def __call__(self, x:Tensor) -> Tensor:
-      return x.sequential([self.encoder, self.quant_conv, lambda l: l[:,0:4], self.post_quant_conv, self.decoder])
+
+   def decode(self, z:Tensor) -> Tensor:
+      dec = self.post_quant_conv(z)
+      dec = self.decoder(dec)
+      return dec
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/discretizer.py#L42
@@ -954,12 +956,7 @@ class SDXL:
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
-      x = self.first_stage_model.decoder(1.0/self.scale_factor * x)
-
-      # make image correct size and scale
-      x = (x + 1.0) / 2.0
-      x = x.reshape(3,512,512).permute(1,2,0).clip(0,1)*255
-      return x.cast(dtypes.uint8)
+      return self.first_stage_model.decode(1.0 / self.scale_factor * x)
 
 
 class VanillaCFG:
@@ -1087,11 +1084,11 @@ if __name__ == "__main__":
    x = model.decode(z)
    print("decoded samples")
 
+   # make image correct size and scale
+   x = (x + 1.0) / 2.0
+   x = x.reshape(3,img_height,img_width).permute(1,2,0).clip(0,1)*255
+   x = x.cast(dtypes.uint8)
    print(x.shape)
    
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
    im.show()
-
-
-
-
