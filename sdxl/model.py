@@ -624,22 +624,25 @@ class FrozenOpenClipEmbedder(Embedder):
    def __init__(self, dims:int=1280):
       self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
-      self.layer_idx = 1
       self.tokenizer = Closed.ClipTokenizer()
    
    def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
+      penultimate = None
       for i, r in enumerate(self.model.transformer.resblocks):
-         if i == len(self.model.transformer.resblocks) - self.layer_idx:
-            break
+         if i == len(self.model.transformer.resblocks) - 1:
+            penultimate = x
          x = r(x, attn_mask=attn_mask)
-      return x
+      assert penultimate is not None, "should have saved a penultimate"
+      return x.permute(1,0,2), penultimate.permute(1,0,2)
 
    def __call__(self, text:Tensor) -> Tensor:
       tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
-      x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask).permute(1,0,2)
+      x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
       x = self.model.ln_final(x)
-      return x
+      pooled = x[Tensor.arange(x.shape[0], tokens.argmax(axis=-1).numpy().item())] @ self.model.text_projection
+
+      return pooled, penultimate
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
@@ -653,7 +656,7 @@ class ConcatTimestepEmbedderND(Embedder):
       b, _ = x.shape
       x = x.flatten()
       emb = timestep_embedding(x, self.outdim)
-      emb = x.reshape((b,-1))
+      emb = emb.reshape((b,-1))
       return emb
 
 
