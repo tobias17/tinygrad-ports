@@ -209,9 +209,11 @@ class UNetModel:
       ]
 
       self.label_emb = [
-         Linear(adm_in_channels, time_embed_dim),
-         Tensor.silu,
-         Linear(time_embed_dim, time_embed_dim),
+         [
+            Linear(adm_in_channels, time_embed_dim),
+            Tensor.silu,
+            Linear(time_embed_dim, time_embed_dim),
+         ]
       ]
 
       self.input_blocks = [
@@ -262,6 +264,7 @@ class UNetModel:
             
             if idx > 0 and i == self.num_res_blocks[idx]:
                layers.append(UNet.Upsample(ch))
+               ds //= 2
             self.output_blocks.append(layers)
 
       self.out = [
@@ -270,7 +273,7 @@ class UNetModel:
          Conv2d(model_channels, out_channels, 3, padding=1),
       ]
 
-   def __call__(self, x:Tensor, tms:Tensor, c:Dict, y:Tensor) -> Tensor:
+   def __call__(self, x:Tensor, tms:Tensor, c:Dict) -> Tensor:
       ctx = c.get("crossattn", None)
       y   = c.get("vector", None)
       cat = c.get("concat", None)
@@ -281,7 +284,7 @@ class UNetModel:
       emb = t_emb.sequential(self.time_embed)
 
       assert y.shape[0] == x.shape[0]
-      emb = emb + y.sequential(self.label_emb)
+      emb = emb + y.sequential(self.label_emb[0])
 
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
@@ -301,6 +304,14 @@ class UNetModel:
          for bb in b:
             x = run(x, bb)
       return x.sequential(self.out)
+
+
+class DiffusionModel:
+   def __init__(self, *args, **kwargs):
+      self.diffusion_model = UNetModel(*args, **kwargs)
+   
+   def __call__(self, *args, **kwargs) -> Tensor:
+      return self.diffusion_model(*args, **kwargs)
 
 
 class Embedder(ABC):
@@ -922,13 +933,13 @@ class Denoiser:
    def idx_to_sigma(self, idx:Union[Tensor,int]) -> Tensor:
       return self.sigmas[idx]
 
-   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict, uc:Dict) -> Tensor:
+   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
       sigma = self.idx_to_sigma(self.sigma_to_idx(sigma))
       sigma_shape = sigma.shape
       sigma = expand_dims(sigma, x)
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
-      return model(x*c_in, c_noise, cond, uc)*c_out + x*c_skip
+      return model(x*c_in, c_noise, cond)*c_out + x*c_skip
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
@@ -938,7 +949,7 @@ class SDXL:
    def __init__(self, config:Dict):
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
-      self.model = UNetModel(**config["model"])
+      self.model = DiffusionModel(**config["model"])
       self.denoiser = Denoiser(**config["denoiser"])
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
@@ -1068,7 +1079,7 @@ if __name__ == "__main__":
    randn = Tensor.randn(shape)
 
    def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
-      return model.denoiser(model.model, x, sigma, c, uc)
+      return model.denoiser(model.model, x, sigma, c)
 
    sampler = DPMPP2MSampler(cfg_scale)
    z = sampler(denoiser, randn, c, uc, steps, cfg_scale)
