@@ -6,7 +6,7 @@
 
 from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
-from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
 from abc import ABC, abstractmethod
@@ -35,6 +35,10 @@ configs: Dict = {
 }
 
 
+def tensor_identity(x:Tensor) -> Tensor:
+   return x
+
+
 class UNet:
    """
    Namespace for UNet model components.
@@ -58,7 +62,7 @@ class UNet:
             lambda x: x,  # needed for weights loading code to work
             Conv2d(out_channels, out_channels, 3, padding=1),
          ]
-         self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else (lambda x: x)
+         self.skip_connection = Conv2d(channels, out_channels, 1) if channels != out_channels else tensor_identity
 
       def __call__(self, x:Tensor, emb:Tensor) -> Tensor:
          h = x.sequential(self.in_layers)
@@ -280,7 +284,7 @@ class UNetModel:
       if cat is not None:
          x = x.cat(cat, dim=1)
 
-      t_emb = timestep_embedding(tms, self.model_channels)
+      t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
       emb = t_emb.sequential(self.time_embed)
 
       assert y.shape[0] == x.shape[0]
@@ -725,7 +729,7 @@ class FirstStage:
          self.conv1 = Conv2d(in_dim, out_dim, 3, stride=1, padding=1)
          self.norm2 = GroupNorm(32, out_dim)
          self.conv2 = Conv2d(out_dim, out_dim, 3, stride=1, padding=1)
-         self.nin_shortcut = (lambda x: x) if in_dim == out_dim else Conv2d(in_dim, out_dim, 1, stride=1, padding=0)
+         self.nin_shortcut = tensor_identity if in_dim == out_dim else Conv2d(in_dim, out_dim, 1, stride=1, padding=0)
 
       def __call__(self, x:Tensor) -> Tensor:
          h = x.sequential([self.norm1, Tensor.swish, self.conv1])
@@ -791,7 +795,7 @@ class FirstStage:
          in_ch_mult = (1,) + tuple(ch_mult)
 
          class BlockEntry:
-            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Any],Any]):
+            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Tensor],Tensor]):
                self.block = block
                self.downsample = downsample
          self.down: List[BlockEntry] = []
@@ -803,8 +807,8 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            downsample = (lambda x: x) if (i_level == len(ch_mult)-1) else FirstStage.Downsample(block_in)
-            self.down.append(BlockEntry(block, downsample))
+            downsample = tensor_identity if (i_level == len(ch_mult)-1) else FirstStage.Downsample(block_in)
+            self.down.append(BlockEntry(block, downsample)) # type: ignore
          
          self.mid = FirstStage.MidEntry(block_in)
 
@@ -846,8 +850,8 @@ class FirstStage:
                block.append(FirstStage.ResnetBlock(block_in, block_out))
                block_in = block_out
             
-            upsample = (lambda x: x) if i_level == 0 else FirstStage.Upsample(block_in)
-            self.up.insert(0, BlockEntry(block, upsample))
+            upsample = tensor_identity if i_level == 0 else FirstStage.Upsample(block_in)
+            self.up.insert(0, BlockEntry(block, upsample)) # type: ignore
          
          self.norm_out = GroupNorm(32, block_in)
          self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
@@ -915,10 +919,10 @@ class Denoiser:
    
    @staticmethod
    def eps_scaling(sigma:Tensor) -> Tuple[Tensor,Tensor,Tensor,Tensor]:
-      c_skip  = Tensor.ones_like(sigma)
-      c_out   = -sigma
-      c_in    = 1 / (sigma**2 + 1.0) ** 0.5
-      c_noise = sigma
+      c_skip  = (Tensor.ones_like(sigma)).cast(dtypes.float16)
+      c_out   = (-sigma).cast(dtypes.float16)
+      c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
+      c_noise = (sigma).cast(dtypes.float16)
       return c_skip, c_out, c_in, c_noise
 
    _sigmas = None
@@ -959,6 +963,12 @@ class SDXL:
       return self.first_stage_model.decode(1.0 / self.scale_factor * x)
 
 
+def fp16_realize(x:Optional[Tensor]) -> Tensor:
+   if x is None:
+      return x
+   return x.cast(dtypes.float16).realize()
+
+
 class VanillaCFG:
    def __init__(self, scale:float):
       self.scale = scale
@@ -967,8 +977,8 @@ class VanillaCFG:
       c_out = {}
       for k in c:
          assert k in ["vector", "crossattn", "concat"]
-         c_out[k] = Tensor.cat(uc[k], c[k], dim=0)
-      return Tensor.cat(x, x), Tensor.cat(s, s), c_out
+         c_out[k] = fp16_realize(Tensor.cat(uc[k], c[k], dim=0))
+      return fp16_realize(Tensor.cat(x, x)), fp16_realize(Tensor.cat(s, s)), c_out
 
    def __call__(self, x:Tensor, sigma:float) -> Tensor:
       x_u, x_c = x.chunk(2)
@@ -984,6 +994,12 @@ class DPMPP2MSampler:
       self.guider = VanillaCFG(cfg_scale)
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
+      old_denoised = fp16_realize(old_denoised)
+      prev_sigma = fp16_realize(prev_sigma)
+      sigma = fp16_realize(sigma)
+      next_sigma = fp16_realize(next_sigma)
+      x = fp16_realize(x)
+
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
       denoised = self.guider(denoised, sigma)
 
@@ -1005,7 +1021,7 @@ class DPMPP2MSampler:
       x = Tensor.where(expand_dims(next_sigma, x) > 0.0, x_advanced, x_standard)
       return x, denoised
 
-   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int, cfg_scale:float) -> Tensor:
+   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
       sigmas = self.discretization(num_steps)
       x *= Tensor.sqrt(1.0 + sigmas[0] ** 2.0)
       num_sigmas = len(sigmas)
@@ -1023,6 +1039,7 @@ class DPMPP2MSampler:
             c=c,
             uc=uc,
          )
+         x.realize(), old_denoised.realize()
       return x
 
 
@@ -1034,6 +1051,8 @@ if __name__ == "__main__":
 
    model = SDXL(configs["SDXL_Base"])
    load_state_dict(model, state_dict, strict=True)
+   for l in get_state_dict(model).values():
+      l.replace(l.cast(dtypes.float16).realize())
    print("loaded state dict")
 
    # sampling params
@@ -1068,6 +1087,8 @@ if __name__ == "__main__":
    }
    print("starting batch creation")
    c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+   for v in c .values(): v.realize()
+   for v in uc.values(): v.realize()
    print("created batches")
 
 
@@ -1079,7 +1100,7 @@ if __name__ == "__main__":
       return model.denoiser(model.model, x, sigma, c)
 
    sampler = DPMPP2MSampler(cfg_scale)
-   z = sampler(denoiser, randn, c, uc, steps, cfg_scale)
+   z = sampler(denoiser, randn, c, uc, steps)
    print("created samples")
    x = model.decode(z)
    print("decoded samples")
@@ -1087,7 +1108,7 @@ if __name__ == "__main__":
    # make image correct size and scale
    x = (x + 1.0) / 2.0
    x = x.reshape(3,img_height,img_width).permute(1,2,0).clip(0,1)*255
-   x = x.cast(dtypes.uint8)
+   x = x.cast(dtypes.float32).realize().cast(dtypes.uint8)
    print(x.shape)
    
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
