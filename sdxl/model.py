@@ -8,6 +8,7 @@ from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
+from tinygrad import TinyJit
 from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
 from abc import ABC, abstractmethod
 from functools import lru_cache
@@ -963,10 +964,16 @@ class SDXL:
       return self.first_stage_model.decode(1.0 / self.scale_factor * x)
 
 
-def fp16_realize(x:Optional[Tensor]) -> Tensor:
+def fp16(x:Optional[Tensor]) -> Optional[Tensor]:
    if x is None:
       return x
-   return x.cast(dtypes.float16).realize()
+   return x.cast(dtypes.float16) # .realize()
+
+def real(x:Optional[Tensor]) -> Optional[Tensor]:
+   if x is None:
+      return x
+   return x.realize()
+
 
 
 class VanillaCFG:
@@ -977,8 +984,8 @@ class VanillaCFG:
       c_out = {}
       for k in c:
          assert k in ["vector", "crossattn", "concat"]
-         c_out[k] = fp16_realize(Tensor.cat(uc[k], c[k], dim=0))
-      return fp16_realize(Tensor.cat(x, x)), fp16_realize(Tensor.cat(s, s)), c_out
+         c_out[k] = fp16(Tensor.cat(uc[k], c[k], dim=0))
+      return fp16(Tensor.cat(x, x)), fp16(Tensor.cat(s, s)), c_out
 
    def __call__(self, x:Tensor, sigma:float) -> Tensor:
       x_u, x_c = x.chunk(2)
@@ -994,11 +1001,11 @@ class DPMPP2MSampler:
       self.guider = VanillaCFG(cfg_scale)
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
-      old_denoised = fp16_realize(old_denoised)
-      prev_sigma = fp16_realize(prev_sigma)
-      sigma = fp16_realize(sigma)
-      next_sigma = fp16_realize(next_sigma)
-      x = fp16_realize(x)
+      old_denoised = fp16(old_denoised)
+      prev_sigma   = fp16(prev_sigma)
+      sigma        = fp16(sigma)
+      next_sigma   = fp16(next_sigma)
+      x            = fp16(x)
 
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
       denoised = self.guider(denoised, sigma)
@@ -1027,19 +1034,34 @@ class DPMPP2MSampler:
       num_sigmas = len(sigmas)
       s_in = Tensor.ones([x.shape[0]])
 
-      old_denoised = None
-      for i in trange(num_sigmas - 1):
-         x, old_denoised = self.sampler_step(
-            old_denoised=old_denoised,
-            prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
-            sigma=(s_in*sigmas[i]),
-            next_sigma=(s_in*sigmas[i+1]),
-            denoiser=denoiser,
-            x=x,
+      for v in c .values(): real(v)
+      for v in uc.values(): real(v)
+
+      @TinyJit
+      def run(sampler, *args, **kwargs):
+         sigma, next_sigma = kwargs.pop("sigmas").chunk(2)
+         out = sampler(
+            *args,
             c=c,
             uc=uc,
+            prev_sigma=real(None if i==0 else s_in*sigmas[i-1]),
+            sigma=sigma,
+            next_sigma=next_sigma,
+            denoiser=denoiser,
+            **kwargs
          )
-         x.realize(), old_denoised.realize()
+         for e in out:
+            e.realize()
+         return out
+
+      old_denoised = None
+      for i in trange(num_sigmas - 1):
+         x, old_denoised = run(
+            self.sampler_step,
+            old_denoised=real(old_denoised),
+            sigmas=real((s_in*sigmas[i]).cat(s_in*sigmas[i+1])),
+            x=real(x),
+         )
       return x
 
 
@@ -1057,8 +1079,8 @@ if __name__ == "__main__":
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
    neg_prompt = ""
-   img_width  = 512
-   img_height = 512
+   img_width  = 768
+   img_height = 768
    steps = 5
    cfg_scale = 6.0
    eta = 1.0
