@@ -1050,17 +1050,15 @@ if __name__ == "__main__":
    state_dict = safe_load(weight_path)
 
    model = SDXL(configs["SDXL_Base"])
-   load_state_dict(model, state_dict, strict=True)
-   for l in get_state_dict(model).values():
-      l.replace(l.cast(dtypes.float16).realize())
+   load_state_dict(model, state_dict, strict=True, apply_fnx=(lambda x: x.cast(dtypes.float16)))
    print("loaded state dict")
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
    neg_prompt = ""
-   img_width  = 1024
-   img_height = 1024
+   img_width  = 512
+   img_height = 512
    steps = 5
    cfg_scale = 6.0
    eta = 1.0
@@ -1090,6 +1088,8 @@ if __name__ == "__main__":
    for v in c .values(): v.realize()
    for v in uc.values(): v.realize()
    print("created batches")
+
+   del model.conditioner
 
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
