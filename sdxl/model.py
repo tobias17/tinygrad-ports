@@ -151,12 +151,12 @@ class UNet:
          b, c, h, w = x.shape
          x_in = x
          x = self.norm(x)
-         x = x.reshape(b, c, h*w).permute(0,2,1)
+         x = x.reshape(b, c, h*w).permute(0,2,1) # b c h w -> b c (h w) -> b (h w) c
          x = self.proj_in(x)
          for block in self.transformer_blocks:
             x = block(x, ctx=ctx)
          x = self.proj_out(x)
-         x = x.permute(0,2,1).reshape(b, c, h, w)
+         x = x.permute(0,2,1).reshape(b, c, h, w) # b (h w) c -> b c (h w) -> b c h w
          return x + x_in
 
 
@@ -185,8 +185,8 @@ class UNet:
 def timestep_embedding(timesteps, dim, max_period=10000):
    half = dim // 2
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
-   args = timesteps[:, None] * freqs[None]
-   return Tensor.cat(args.cos(), args.sin(), dim=-1)
+   args = timesteps[:, None].cast(dtypes.float32) * freqs[None]
+   return Tensor.cat(args.cos(), args.sin(), dim=-1).cast(dtypes.float16)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
@@ -1020,7 +1020,7 @@ class DPMPP2MSampler:
       mults = [expand_dims(m, x) for m in mults]
 
       x_standard = mults[0]*x - mults[1]*denoised
-      if (old_denoised is None) or (next_sigma.sum() < 1e-14).item():
+      if (old_denoised is None) or (next_sigma.sum().numpy().item() < 1e-14):
          return x_standard, denoised
       
       denoised_d = mults[2]*denoised - mults[3]*old_denoised
@@ -1037,7 +1037,7 @@ class DPMPP2MSampler:
       for v in c .values(): real(v)
       for v in uc.values(): real(v)
 
-      @TinyJit
+      #@TinyJit
       def run(sampler, *args, **kwargs):
          sigma, next_sigma = kwargs.pop("sigmas").chunk(2)
          out = sampler(
