@@ -1079,8 +1079,8 @@ if __name__ == "__main__":
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
    pos_prompt = "a horse sized cat eating a bagel"
    neg_prompt = ""
-   img_width  = 768
-   img_height = 768
+   img_width  = 1024
+   img_height = 1024
    steps = 5
    cfg_scale = 6.0
    eta = 1.0
@@ -1090,39 +1090,42 @@ if __name__ == "__main__":
    C = 4
    F = 8
 
-   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
-   batch_c : Dict = {
-      "txt": pos_prompt,
-      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   }
-   batch_uc: Dict = {
-      "txt": neg_prompt,
-      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   }
-   print("starting batch creation")
-   c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
-   for v in c .values(): v.realize()
-   for v in uc.values(): v.realize()
-   print("created batches")
+   # # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
+   # batch_c : Dict = {
+   #    "txt": pos_prompt,
+   #    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+   #    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+   #    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+   #    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   # }
+   # batch_uc: Dict = {
+   #    "txt": neg_prompt,
+   #    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+   #    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+   #    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+   #    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   # }
+   # print("starting batch creation")
+   # c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+   # for v in c .values(): v.realize()
+   # for v in uc.values(): v.realize()
+   # print("created batches")
 
-   del model.conditioner
+   # del model.conditioner
 
 
-   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
-   shape = (N, C, img_height // F, img_width // F)
-   randn = Tensor.randn(shape)
+   # # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
+   # shape = (N, C, img_height // F, img_width // F)
+   # randn = Tensor.randn(shape)
 
-   def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
-      return model.denoiser(model.model, x, sigma, c)
+   # def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
+   #    return model.denoiser(model.model, x, sigma, c)
 
-   sampler = DPMPP2MSampler(cfg_scale)
-   z = sampler(denoiser, randn, c, uc, steps)
+   # sampler = DPMPP2MSampler(cfg_scale)
+   # z = sampler(denoiser, randn, c, uc, steps)
+
+   z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
+
    print("created samples")
    x = model.decode(z)
    print("decoded samples")
