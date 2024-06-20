@@ -1118,13 +1118,20 @@ if __name__ == "__main__":
    # shape = (N, C, img_height // F, img_width // F)
    # randn = Tensor.randn(shape)
 
-   # def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
-   #    return model.denoiser(model.model, x, sigma, c)
+   c, uc = {}, {} # type: ignore
+   root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
+   randn = Tensor(np.load(f"{root}/randn.npy"))
+   for f in os.listdir(root):
+      if f.startswith("c_"):  c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}"))
+      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}"))
 
-   # sampler = DPMPP2MSampler(cfg_scale)
-   # z = sampler(denoiser, randn, c, uc, steps)
+   def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
+      return model.denoiser(model.model, x, sigma, c)
 
-   z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
+   sampler = DPMPP2MSampler(cfg_scale)
+   z = sampler(denoiser, randn, c, uc, steps)
+
+   # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
 
    print("created samples")
    x = model.decode(z)
