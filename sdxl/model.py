@@ -1037,31 +1037,46 @@ class DPMPP2MSampler:
       for v in c .values(): real(v)
       for v in uc.values(): real(v)
 
-      #@TinyJit
-      def run(sampler, *args, **kwargs):
-         sigma, next_sigma = kwargs.pop("sigmas").chunk(2)
-         out = sampler(
-            *args,
-            c=c,
-            uc=uc,
-            prev_sigma=real(None if i==0 else s_in*sigmas[i-1]),
-            sigma=sigma,
-            next_sigma=next_sigma,
-            denoiser=denoiser,
-            **kwargs
-         )
-         for e in out:
-            e.realize()
-         return out
+      # @TinyJit
+      # def run(sampler, *args, **kwargs):
+      #    sigma, next_sigma = kwargs.pop("sigmas").chunk(2)
+      #    out = sampler(
+      #       *args,
+      #       c=c,
+      #       uc=uc,
+      #       prev_sigma=real(None if i==0 else s_in*sigmas[i-1]),
+      #       sigma=sigma,
+      #       next_sigma=next_sigma,
+      #       denoiser=denoiser,
+      #       **kwargs
+      #    )
+      #    for e in out:
+      #       e.realize()
+      #    return out
 
-      old_denoised = None
-      for i in trange(num_sigmas - 1):
-         x, old_denoised = run(
-            self.sampler_step,
-            old_denoised=real(old_denoised),
-            sigmas=real((s_in*sigmas[i]).cat(s_in*sigmas[i+1])),
-            x=real(x),
-         )
+      # old_denoised = None
+      # for i in trange(num_sigmas - 1):
+      #    x, old_denoised = run(
+      #       self.sampler_step,
+      #       old_denoised=real(old_denoised),
+      #       sigmas=real((s_in*sigmas[i]).cat(s_in*sigmas[i+1])),
+      #       x=real(x),
+      #    )
+
+      root = "/home/tobi/repos/tinygrad-ports/weights/last_stage"
+      kwargs = {}
+      for f in os.listdir(root):
+         comps = f.replace(".npy","").split("__")
+         data = Tensor(np.load(f"{root}/{f}"))
+         if len(comps) == 1:
+            kwargs[comps[0]] = data
+         elif len(comps) == 2:
+            inner = kwargs.get(comps[0], {})
+            inner[comps[1]] = data
+            kwargs[comps[0]] = inner
+
+      x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
+
       return x
 
 
@@ -1081,7 +1096,7 @@ if __name__ == "__main__":
    neg_prompt = ""
    img_width  = 1024
    img_height = 1024
-   steps = 5
+   steps = 20
    cfg_scale = 6.0
    eta = 1.0
    aesthetic_score = 5.0
