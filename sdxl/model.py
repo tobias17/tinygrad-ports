@@ -945,6 +945,10 @@ class Denoiser:
       sigma_shape = sigma.shape
       sigma = expand_dims(sigma, x)
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
+      print(f"c_skip: {c_skip.numpy()}")
+      print(f"c_out: {c_out.numpy()}")
+      print(f"c_in: {c_in.numpy()}")
+      print(f"c_noise: {c_noise.numpy()}")
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
       return model(x*c_in, c_noise, cond)*c_out + x*c_skip
 
@@ -967,6 +971,7 @@ class SDXL:
 def fp16(x:Optional[Tensor]) -> Optional[Tensor]:
    if x is None:
       return x
+   return x
    return x.cast(dtypes.float16) # .realize()
 
 def real(x:Optional[Tensor]) -> Optional[Tensor]:
