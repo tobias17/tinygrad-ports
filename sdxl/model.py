@@ -279,23 +279,23 @@ class UNetModel:
       ]
 
    def __call__(self, x:Tensor, tms:Tensor, c:Dict) -> Tensor:
-      # ctx = c.get("crossattn", None)
-      # y   = c.get("vector", None)
-      # cat = c.get("concat", None)
-      # if cat is not None:
-      #    x = x.cat(cat, dim=1)
+      ctx = c.get("crossattn", None)
+      y   = c.get("vector", None)
+      cat = c.get("concat", None)
+      if cat is not None:
+         x = x.cat(cat, dim=1)
 
-      # t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
-      # emb = t_emb.sequential(self.time_embed)
+      t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
+      emb = t_emb.sequential(self.time_embed)
 
-      # assert y.shape[0] == x.shape[0]
-      # emb = emb + y.sequential(self.label_emb[0])
+      assert y.shape[0] == x.shape[0]
+      emb = emb + y.sequential(self.label_emb[0])
 
-      # def run(x:Tensor, bb) -> Tensor:
-      #    if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
-      #    elif isinstance(bb, UNet.SpatialTransformer): x = bb(x, ctx)
-      #    else: x = bb(x)
-      #    return x
+      def run(x:Tensor, bb) -> Tensor:
+         if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
+         elif isinstance(bb, UNet.SpatialTransformer): x = bb(x, ctx)
+         else: x = bb(x)
+         return x
 
       # saved_inputs = []
       # for b in self.input_blocks:
@@ -304,12 +304,23 @@ class UNetModel:
       #    saved_inputs.append(x)
       # for bb in self.middle_block:
       #    x = run(x, bb)
-      # for b in self.output_blocks:
-      #    x = x.cat(saved_inputs.pop(), dim=1)
-      #    for bb in b:
-      #       x = run(x, bb)
 
-      x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
+      saved_inputs = []
+      root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
+      x = Tensor(np.load(f"{root}/h.npy")).realize()
+      for i in range(1024):
+         filepath = f"{root}/{i}.npy"
+         if os.path.exists(filepath):
+            saved_inputs.append(Tensor(np.load(filepath)).realize())
+         else:
+            break
+
+      for b in self.output_blocks:
+         x = x.cat(saved_inputs.pop(), dim=1)
+         for bb in b:
+            x = run(x, bb)
+
+      # x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
 
       return x.sequential(self.out)
 
