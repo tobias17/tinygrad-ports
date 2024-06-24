@@ -291,6 +291,10 @@ class UNetModel:
       assert y.shape[0] == x.shape[0]
       emb = emb + y.sequential(self.label_emb[0])
 
+      root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
+      emb = Tensor(np.load(f"{root}/emb.npy")).realize()
+      ctx = Tensor(np.load(f"{root}/ctx.npy")).realize()
+
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
          elif isinstance(bb, UNet.SpatialTransformer): x = bb(x, ctx)
@@ -306,7 +310,6 @@ class UNetModel:
       #    x = run(x, bb)
 
       saved_inputs = []
-      root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
       x = Tensor(np.load(f"{root}/h.npy")).realize()
       for i in range(1024):
          filepath = f"{root}/{i}.npy"
