@@ -320,8 +320,9 @@ class UNetModel:
       #    for bb in b:
       #       x = run(x, bb)
 
-      x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
+      # x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
 
+      return Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_seq_h.npy"))
       return x.sequential(self.out)
 
 
@@ -964,6 +965,10 @@ class Denoiser:
       # print(f"c_in: {c_in.numpy()}")
       # print(f"c_noise: {c_noise.numpy()}")
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
+
+      c_out  = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_out.npy"))
+      c_skip = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_skip.npy"))
+      x      = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_input.npy"))
       return model(x*c_in, c_noise, cond)*c_out + x*c_skip
 
 
@@ -1029,7 +1034,6 @@ class DPMPP2MSampler:
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
       # denoised = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/pre_guider.npy"))
       denoised = self.guider(denoised, sigma)
-      # denoised = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_guider.npy"))
 
       t, t_next = sigma.log().neg(), next_sigma.log().neg()
       h = t_next - t
