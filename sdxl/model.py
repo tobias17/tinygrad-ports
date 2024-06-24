@@ -305,25 +305,25 @@ class UNetModel:
       # for bb in self.middle_block:
       #    x = run(x, bb)
 
-      # saved_inputs = []
-      # root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
-      # x = Tensor(np.load(f"{root}/h.npy")).realize()
-      # for i in range(1024):
-      #    filepath = f"{root}/{i}.npy"
-      #    if os.path.exists(filepath):
-      #       saved_inputs.append(Tensor(np.load(filepath)).realize())
-      #    else:
-      #       break
+      saved_inputs = []
+      root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
+      x = Tensor(np.load(f"{root}/h.npy")).realize()
+      for i in range(1024):
+         filepath = f"{root}/{i}.npy"
+         if os.path.exists(filepath):
+            saved_inputs.append(Tensor(np.load(filepath)).realize())
+         else:
+            break
 
-      # for b in self.output_blocks:
-      #    x = x.cat(saved_inputs.pop(), dim=1)
-      #    for bb in b:
-      #       x = run(x, bb)
+      for b in self.output_blocks:
+         x = x.cat(saved_inputs.pop(), dim=1)
+         for bb in b:
+            x = run(x, bb)
 
       # x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
-
-      return Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_seq_h.npy"))
       return x.sequential(self.out)
+
+      # return Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_seq_h.npy"))
 
 
 class DiffusionModel:
