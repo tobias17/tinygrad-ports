@@ -1027,7 +1027,9 @@ class DPMPP2MSampler:
       x            = fp16(x)
 
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
+      # denoised = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/pre_guider.npy"))
       denoised = self.guider(denoised, sigma)
+      # denoised = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_guider.npy"))
 
       t, t_next = sigma.log().neg(), next_sigma.log().neg()
       h = t_next - t
@@ -1107,18 +1109,18 @@ if __name__ == "__main__":
 
    model = SDXL(configs["SDXL_Base"])
 
-   model_keys = set(get_state_dict(model).keys())
-   weight_keys = set(state_dict.keys())
-   print(f"model_keys:  {len(model_keys)}")
-   print(f"weight_keys: {len(weight_keys)}")
-   print(f"intersect:   {len(model_keys.intersection(weight_keys))}")
-   print("\nModel Only Keys:")
-   for k in sorted(model_keys.difference(weight_keys)):
-      print(k)
-   print("\nWeight Only Keys:")
-   for k in sorted(weight_keys.difference(model_keys)):
-      print(k)
-   assert False
+   # model_keys = set(get_state_dict(model).keys())
+   # weight_keys = set(state_dict.keys())
+   # print(f"model_keys:  {len(model_keys)}")
+   # print(f"weight_keys: {len(weight_keys)}")
+   # print(f"intersect:   {len(model_keys.intersection(weight_keys))}")
+   # print("\nModel Only Keys:")
+   # for k in sorted(model_keys.difference(weight_keys)):
+   #    print(k)
+   # print("\nWeight Only Keys:")
+   # for k in sorted(weight_keys.difference(model_keys)):
+   #    print(k)
+   # assert False
 
    load_state_dict(model, state_dict, strict=True, apply_fnx=(lambda x: x.cast(dtypes.float16)))
    print("loaded state dict")
@@ -1177,9 +1179,9 @@ if __name__ == "__main__":
       return model.denoiser(model.model, x, sigma, c)
 
    sampler = DPMPP2MSampler(cfg_scale)
-   # z = sampler(denoiser, randn, c, uc, steps)
+   z = sampler(denoiser, randn, c, uc, steps)
 
-   z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
+   # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
 
    print("created samples")
    x = model.decode(z)
