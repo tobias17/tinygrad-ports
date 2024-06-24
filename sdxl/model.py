@@ -623,7 +623,7 @@ class Open:
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
-      def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=24):
+      def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=32):
          self.token_embedding = Embedding(vocab_size, dims)
          self.positional_embedding = Tensor.empty(ctx_length, dims)
          self.transformer = Open.ClipTransformer(dims, layers, n_heads)
@@ -1113,13 +1113,13 @@ if __name__ == "__main__":
    print(f"weight_keys: {len(weight_keys)}")
    print(f"intersect:   {len(model_keys.intersection(weight_keys))}")
    print("\nModel Only Keys:")
-   for k in model_keys.difference(weight_keys):
+   for k in sorted(model_keys.difference(weight_keys)):
       print(k)
    print("\nWeight Only Keys:")
-   for k in weight_keys.difference(model_keys):
+   for k in sorted(weight_keys.difference(model_keys)):
       print(k)
-
    assert False
+
    load_state_dict(model, state_dict, strict=True, apply_fnx=(lambda x: x.cast(dtypes.float16)))
    print("loaded state dict")
 
