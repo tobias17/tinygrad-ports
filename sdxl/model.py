@@ -1046,6 +1046,8 @@ class DPMPP2MSampler:
 
       old_denoised = None
       for i in trange(num_sigmas - 1):
+         if old_denoised is not None:
+            old_denoised.realize()
          x, old_denoised = self.sampler_step(
             old_denoised=old_denoised,
             prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
@@ -1056,12 +1058,14 @@ class DPMPP2MSampler:
             c=c,
             uc=uc,
          )
+         x.realize()
 
       return x
 
 
 if __name__ == "__main__":
    Tensor.no_grad = True
+   Tensor.manual_seed(1234)
 
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
    state_dict = safe_load(weight_path)
@@ -1089,7 +1093,7 @@ if __name__ == "__main__":
    neg_prompt = ""
    img_width  = 1024
    img_height = 1024
-   steps = 20
+   steps = 5
    cfg_scale = 6.0
    eta = 1.0
    aesthetic_score = 5.0
@@ -1121,17 +1125,16 @@ if __name__ == "__main__":
 
    # del model.conditioner
 
+   root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
 
-   # # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
-   # shape = (N, C, img_height // F, img_width // F)
-   # randn = Tensor.randn(shape)
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
+   shape = (N, C, img_height // F, img_width // F)
+   randn = Tensor.randn(shape)
 
    c, uc = {}, {} # type: ignore
-   root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
-   randn = Tensor(np.load(f"{root}/randn.npy"))
    for f in os.listdir(root):
-      if f.startswith("c_"):  c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}"))
-      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}"))
+      if f.startswith("c_"):  c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
+      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
 
    def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
       return model.denoiser(model.model, x, sigma, c)
