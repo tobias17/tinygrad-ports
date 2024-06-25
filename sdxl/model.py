@@ -278,13 +278,7 @@ class UNetModel:
          Conv2d(model_channels, out_channels, 3, padding=1),
       ]
 
-   def __call__(self, x:Tensor, tms:Tensor, c:Dict) -> Tensor:
-      ctx: Tensor = c.get("crossattn", None)
-      y  : Tensor = c.get("vector", None)
-      cat: Tensor = c.get("concat", None)
-      if cat is not None:
-         x = x.cat(cat, dim=1)
-
+   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
       t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
       emb = t_emb.sequential(self.time_embed)
 
@@ -642,8 +636,6 @@ class Open:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 class FrozenOpenClipEmbedder(Embedder):
-   # layer = "penultimate"
-   # always_return_pooled = True
    def __init__(self, dims:int=1280):
       self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
@@ -952,15 +944,14 @@ class Denoiser:
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
 
-      print(f"c_skip: {c_skip.numpy()}")
-      print(f"c_out: {c_out.numpy()}")
-      print(f"c_in: {c_in.numpy()}")
-      print(f"c_noise: {c_noise.numpy()}")
-
-      c_out  = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_out.npy"))
-      c_skip = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_skip.npy"))
-      x      = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_input.npy"))
-      return model(x*c_in, c_noise, cond)*c_out + x*c_skip
+      @TinyJit
+      def run(input, tms, ctx, y, c_out, add):
+         return (model(input, tms, ctx, y)*c_out + add).realize()
+      
+      def prep(*tensors:Tensor):
+         return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+      
+      return run(*prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip))
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
@@ -1049,50 +1040,32 @@ class DPMPP2MSampler:
       num_sigmas = len(sigmas)
       s_in = Tensor.ones([x.shape[0]])
 
-      for v in c .values(): real(v)
-      for v in uc.values(): real(v)
-
-      # @TinyJit
-      # def run(sampler, *args, **kwargs):
-      #    sigma, next_sigma = kwargs.pop("sigmas").chunk(2)
-      #    out = sampler(
-      #       *args,
-      #       c=c,
-      #       uc=uc,
-      #       prev_sigma=real(None if i==0 else s_in*sigmas[i-1]),
-      #       sigma=sigma,
-      #       next_sigma=next_sigma,
-      #       denoiser=denoiser,
-      #       **kwargs
-      #    )
-      #    for e in out:
-      #       e.realize()
-      #    return out
-
-      # old_denoised = None
-      # for i in trange(num_sigmas - 1):
-      #    x, old_denoised = run(
-      #       self.sampler_step,
-      #       old_denoised=real(old_denoised),
-      #       sigmas=real((s_in*sigmas[i]).cat(s_in*sigmas[i+1])),
-      #       x=real(x),
-      #    )
-
-      root = "/home/tobi/repos/tinygrad-ports/weights/last_stage"
-      kwargs = {}
-      for f in os.listdir(root):
-         comps = f.replace(".npy","").split("__")
-         data = Tensor(np.load(f"{root}/{f}"))
-         if len(comps) == 1:
-            kwargs[comps[0]] = data
-         elif len(comps) == 2:
-            inner = kwargs.get(comps[0], {})
-            inner[comps[1]] = data
-            kwargs[comps[0]] = inner
-
-      print(f"SIGMAS: {kwargs['sigma'].numpy()}")
-
-      x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
+      old_denoised = None
+      for i in trange(num_sigmas - 1):
+         if i == 10:
+            root = "/home/tobi/repos/tinygrad-ports/weights/stage_10"
+            kwargs = {}
+            for f in os.listdir(root):
+               comps = f.replace(".npy","").split("__")
+               data = Tensor(np.load(f"{root}/{f}"))
+               if len(comps) == 1:
+                  kwargs[comps[0]] = data
+               elif len(comps) == 2:
+                  inner = kwargs.get(comps[0], {})
+                  inner[comps[1]] = data
+                  kwargs[comps[0]] = inner
+            x, old_denoised = self.sampler_step(**kwargs, denoiser=denoiser)
+         else:
+            x, old_denoised = self.sampler_step(
+               old_denoised=old_denoised,
+               prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
+               sigma=s_in*sigmas[i],
+               next_sigma=s_in*sigmas[i+1],
+               denoiser=denoiser,
+               x=x,
+               c=c,
+               uc=uc,
+            )
 
       return x
 
@@ -1119,7 +1092,6 @@ if __name__ == "__main__":
    # assert False
 
    load_state_dict(model, state_dict, strict=True, apply_fnx=(lambda x: x.cast(dtypes.float16)))
-   print("loaded state dict")
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
