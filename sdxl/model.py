@@ -279,9 +279,9 @@ class UNetModel:
       ]
 
    def __call__(self, x:Tensor, tms:Tensor, c:Dict) -> Tensor:
-      ctx = c.get("crossattn", None)
-      y   = c.get("vector", None)
-      cat = c.get("concat", None)
+      ctx: Tensor = c.get("crossattn", None)
+      y  : Tensor = c.get("vector", None)
+      cat: Tensor = c.get("concat", None)
       if cat is not None:
          x = x.cat(cat, dim=1)
 
@@ -291,10 +291,9 @@ class UNetModel:
       assert y.shape[0] == x.shape[0]
       emb = emb + y.sequential(self.label_emb[0])
 
-      root = "/home/tobi/repos/tinygrad-ports/weights/pre_all_h"
-      emb = Tensor(np.load(f"{root}/emb.npy")).cast(dtypes.float16).realize()
+      emb = emb.cast(dtypes.float16).realize()
       ctx = ctx.cast(dtypes.float16).realize()
-      x   = Tensor(np.load(f"{root}/x.npy")).cast(dtypes.float16).realize()
+      x = x.cast(dtypes.float16).realize()
 
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
@@ -314,10 +313,7 @@ class UNetModel:
          for bb in b:
             x = run(x, bb)
 
-      # x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_h.npy"))
       return x.sequential(self.out)
-
-      # return Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/post_seq_h.npy"))
 
 
 class DiffusionModel:
@@ -910,7 +906,7 @@ class LegacyDDPMDiscretization:
       elif n == self.num_timesteps:
          alphas_cumprod = self.alphas_cumprod
       sigmas = Tensor((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
-      sigmas = sigmas.flip((0,)).cat(Tensor.ones((1,)))
+      sigmas = Tensor.cat(Tensor.ones((1,)), sigmas)
       return sigmas
 
 
@@ -929,10 +925,10 @@ class Denoiser:
    
    @staticmethod
    def eps_scaling(sigma:Tensor) -> Tuple[Tensor,Tensor,Tensor,Tensor]:
-      c_skip  = (Tensor.ones_like(sigma)).cast(dtypes.float16)
+      c_skip  = Tensor.ones_like(sigma).cast(dtypes.float16)
       c_out   = (-sigma).cast(dtypes.float16)
       c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
-      c_noise = (sigma).cast(dtypes.float16)
+      c_noise = sigma.cast(dtypes.float16)
       return c_skip, c_out, c_in, c_noise
 
    _sigmas = None
@@ -954,11 +950,12 @@ class Denoiser:
       sigma_shape = sigma.shape
       sigma = expand_dims(sigma, x)
       c_skip, c_out, c_in, c_noise = self.scaling(sigma)
-      # print(f"c_skip: {c_skip.numpy()}")
-      # print(f"c_out: {c_out.numpy()}")
-      # print(f"c_in: {c_in.numpy()}")
-      # print(f"c_noise: {c_noise.numpy()}")
       c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
+
+      print(f"c_skip: {c_skip.numpy()}")
+      print(f"c_out: {c_out.numpy()}")
+      print(f"c_in: {c_in.numpy()}")
+      print(f"c_noise: {c_noise.numpy()}")
 
       c_out  = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_out.npy"))
       c_skip = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/last_den_c_skip.npy"))
@@ -1026,7 +1023,6 @@ class DPMPP2MSampler:
       x            = fp16(x)
 
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
-      # denoised = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/pre_guider.npy"))
       denoised = self.guider(denoised, sigma)
 
       t, t_next = sigma.log().neg(), next_sigma.log().neg()
@@ -1093,6 +1089,8 @@ class DPMPP2MSampler:
             inner = kwargs.get(comps[0], {})
             inner[comps[1]] = data
             kwargs[comps[0]] = inner
+
+      print(f"SIGMAS: {kwargs['sigma'].numpy()}")
 
       x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
 
