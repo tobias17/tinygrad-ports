@@ -909,9 +909,9 @@ def expand_dims(x:Tensor, t:Tensor) -> Tensor:
 
 
 
-@TinyJit
-def run(model, input, tms, ctx, y, c_out, add):
-   return (model(input, tms, ctx, y)*c_out + add).realize()
+# @TinyJit
+# def run(model, input, tms, ctx, y, c_out, add):
+#    return (model(input, tms, ctx, y)*c_out + add).realize()
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
 class Denoiser:
@@ -952,7 +952,10 @@ class Denoiser:
       def prep(*tensors:Tensor):
          return tuple(t.cast(dtypes.float16).realize() for t in tensors)
       
-      return run(model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip))
+      # return run(model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip))
+
+      input, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip)
+      return model(input, tms, ctx, y)*c_out + add
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
@@ -1029,7 +1032,7 @@ class DPMPP2MSampler:
       x_standard = mults[0]*x - mults[1]*denoised
       if (old_denoised is None) or (next_sigma.sum().numpy().item() < 1e-14):
          return x_standard, denoised
-      
+
       denoised_d = mults[2]*denoised - mults[3]*old_denoised
       x_advanced = mults[0]*x        - mults[1]*denoised_d
       x = Tensor.where(expand_dims(next_sigma, x) > 0.0, x_advanced, x_standard)
@@ -1043,51 +1046,16 @@ class DPMPP2MSampler:
 
       old_denoised = None
       for i in trange(num_sigmas - 1):
-         if i < 15:
-            continue
-         elif i == 15:
-            root = "/home/tobi/repos/tinygrad-ports/weights/stage_15"
-            kwargs = {}
-            for f in os.listdir(root):
-               comps = f.replace(".npy","").split("__")
-               data = Tensor(np.load(f"{root}/{f}"))
-               if len(comps) == 1:
-                  kwargs[comps[0]] = data
-               elif len(comps) == 2:
-                  inner = kwargs.get(comps[0], {})
-                  inner[comps[1]] = data
-                  kwargs[comps[0]] = inner
-            x, old_denoised = self.sampler_step(**kwargs, denoiser=denoiser)
-         else:
-            x, old_denoised = self.sampler_step(
-               old_denoised=old_denoised,
-               prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
-               sigma=s_in*sigmas[i],
-               next_sigma=s_in*sigmas[i+1],
-               denoiser=denoiser,
-               x=x,
-               c=c,
-               uc=uc,
-            )
-
-      # root = "/home/tobi/repos/tinygrad-ports/weights/last_stage"
-      # kwargs = {}
-      # for f in os.listdir(root):
-      #    comps = f.replace(".npy","").split("__")
-      #    data = Tensor(np.load(f"{root}/{f}"))
-      #    if len(comps) == 1:
-      #       kwargs[comps[0]] = data
-      #    elif len(comps) == 2:
-      #       inner = kwargs.get(comps[0], {})
-      #       inner[comps[1]] = data
-      #       kwargs[comps[0]] = inner
-
-      # kwargs["c"]  = c
-      # kwargs["uc"] = uc
-      # kwargs["next_sigma"] = s_in*sigmas[-1]
-      # kwargs["sigma"]      = s_in*sigmas[-2]
-      # kwargs["prev_sigma"] = s_in*sigmas[-3]
-      # x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
+         x, old_denoised = self.sampler_step(
+            old_denoised=old_denoised,
+            prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
+            sigma=s_in*sigmas[i],
+            next_sigma=s_in*sigmas[i+1],
+            denoiser=denoiser,
+            x=x,
+            c=c,
+            uc=uc,
+         )
 
       return x
 
