@@ -899,7 +899,7 @@ class LegacyDDPMDiscretization:
          alphas_cumprod = self.alphas_cumprod
       sigmas = Tensor((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
       sigmas = Tensor.cat(Tensor.zeros((1,)), sigmas)
-      return sigmas if flip else sigmas.flip(axis=0)
+      return sigmas if flip else sigmas.flip(axis=0) # sigmas is "pre-flipped", need to do oposite of flag
 
 
 def expand_dims(x:Tensor, t:Tensor) -> Tensor:
@@ -932,7 +932,7 @@ class Denoiser:
    @property
    def sigmas(self) -> Tensor:
       if self._sigmas is None:
-         self._sigmas = self.discretization(self.num_idx, flip=False)
+         self._sigmas = self.discretization(self.num_idx, flip=True)
       return self._sigmas
 
    def sigma_to_idx(self, sigma:Tensor) -> Tensor:
@@ -1041,53 +1041,53 @@ class DPMPP2MSampler:
       num_sigmas = len(sigmas)
       s_in = Tensor.ones([x.shape[0]])
 
-      # old_denoised = None
-      # for i in trange(num_sigmas - 1):
-      #    if i < 15:
-      #       continue
-      #    elif i == 15:
-      #       root = "/home/tobi/repos/tinygrad-ports/weights/stage_15"
-      #       kwargs = {}
-      #       for f in os.listdir(root):
-      #          comps = f.replace(".npy","").split("__")
-      #          data = Tensor(np.load(f"{root}/{f}"))
-      #          if len(comps) == 1:
-      #             kwargs[comps[0]] = data
-      #          elif len(comps) == 2:
-      #             inner = kwargs.get(comps[0], {})
-      #             inner[comps[1]] = data
-      #             kwargs[comps[0]] = inner
-      #       x, old_denoised = self.sampler_step(**kwargs, denoiser=denoiser)
-      #    else:
-      #       x, old_denoised = self.sampler_step(
-      #          old_denoised=old_denoised,
-      #          prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
-      #          sigma=s_in*sigmas[i],
-      #          next_sigma=s_in*sigmas[i+1],
-      #          denoiser=denoiser,
-      #          x=x,
-      #          c=c,
-      #          uc=uc,
-      #       )
+      old_denoised = None
+      for i in trange(num_sigmas - 1):
+         if i < 15:
+            continue
+         elif i == 15:
+            root = "/home/tobi/repos/tinygrad-ports/weights/stage_15"
+            kwargs = {}
+            for f in os.listdir(root):
+               comps = f.replace(".npy","").split("__")
+               data = Tensor(np.load(f"{root}/{f}"))
+               if len(comps) == 1:
+                  kwargs[comps[0]] = data
+               elif len(comps) == 2:
+                  inner = kwargs.get(comps[0], {})
+                  inner[comps[1]] = data
+                  kwargs[comps[0]] = inner
+            x, old_denoised = self.sampler_step(**kwargs, denoiser=denoiser)
+         else:
+            x, old_denoised = self.sampler_step(
+               old_denoised=old_denoised,
+               prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
+               sigma=s_in*sigmas[i],
+               next_sigma=s_in*sigmas[i+1],
+               denoiser=denoiser,
+               x=x,
+               c=c,
+               uc=uc,
+            )
 
-      root = "/home/tobi/repos/tinygrad-ports/weights/last_stage"
-      kwargs = {}
-      for f in os.listdir(root):
-         comps = f.replace(".npy","").split("__")
-         data = Tensor(np.load(f"{root}/{f}"))
-         if len(comps) == 1:
-            kwargs[comps[0]] = data
-         elif len(comps) == 2:
-            inner = kwargs.get(comps[0], {})
-            inner[comps[1]] = data
-            kwargs[comps[0]] = inner
+      # root = "/home/tobi/repos/tinygrad-ports/weights/last_stage"
+      # kwargs = {}
+      # for f in os.listdir(root):
+      #    comps = f.replace(".npy","").split("__")
+      #    data = Tensor(np.load(f"{root}/{f}"))
+      #    if len(comps) == 1:
+      #       kwargs[comps[0]] = data
+      #    elif len(comps) == 2:
+      #       inner = kwargs.get(comps[0], {})
+      #       inner[comps[1]] = data
+      #       kwargs[comps[0]] = inner
 
-      kwargs["c"]  = c
-      kwargs["uc"] = uc
-      kwargs["next_sigma"] = s_in*sigmas[-1]
-      kwargs["sigma"]      = s_in*sigmas[-2]
-      kwargs["prev_sigma"] = s_in*sigmas[-3]
-      x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
+      # kwargs["c"]  = c
+      # kwargs["uc"] = uc
+      # kwargs["next_sigma"] = s_in*sigmas[-1]
+      # kwargs["sigma"]      = s_in*sigmas[-2]
+      # kwargs["prev_sigma"] = s_in*sigmas[-3]
+      # x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
 
       return x
 
