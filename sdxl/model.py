@@ -891,15 +891,15 @@ class LegacyDDPMDiscretization:
       alphas = 1.0 - betas
       self.alphas_cumprod = np.cumprod(alphas, axis=0)
 
-   def __call__(self, n:int) -> Tensor:
+   def __call__(self, n:int, flip:bool=False) -> Tensor:
       if n < self.num_timesteps:
          timesteps = np.linspace(self.num_timesteps - 1, 0, n, endpoint=False).astype(int)[::-1]
          alphas_cumprod = self.alphas_cumprod[timesteps]
       elif n == self.num_timesteps:
          alphas_cumprod = self.alphas_cumprod
       sigmas = Tensor((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
-      sigmas = Tensor.cat(Tensor.ones((1,)), sigmas)
-      return sigmas
+      sigmas = Tensor.cat(Tensor.zeros((1,)), sigmas)
+      return sigmas if flip else sigmas.flip(axis=0)
 
 
 def expand_dims(x:Tensor, t:Tensor) -> Tensor:
@@ -932,7 +932,7 @@ class Denoiser:
    @property
    def sigmas(self) -> Tensor:
       if self._sigmas is None:
-         self._sigmas = self.discretization(self.num_idx)
+         self._sigmas = self.discretization(self.num_idx, flip=False)
       return self._sigmas
 
    def sigma_to_idx(self, sigma:Tensor) -> Tensor:
@@ -1084,8 +1084,8 @@ class DPMPP2MSampler:
 
       kwargs["c"]  = c
       kwargs["uc"] = uc
-      # kwargs["next_sigma"] = s_in*sigmas[-1]
-      # kwargs["sigma"]      = s_in*sigmas[-2]
+      kwargs["next_sigma"] = s_in*sigmas[-1]
+      kwargs["sigma"]      = s_in*sigmas[-2]
       kwargs["prev_sigma"] = s_in*sigmas[-3]
       x, _ = self.sampler_step(**kwargs, denoiser=denoiser)
 
