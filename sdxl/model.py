@@ -291,9 +291,10 @@ class UNetModel:
       assert y.shape[0] == x.shape[0]
       emb = emb + y.sequential(self.label_emb[0])
 
-      root = "/home/tobi/repos/tinygrad-ports/weights/pre_out_h"
-      emb = Tensor(np.load(f"{root}/emb.npy")).realize()
-      ctx = Tensor(np.load(f"{root}/ctx.npy")).realize()
+      root = "/home/tobi/repos/tinygrad-ports/weights/pre_all_h"
+      emb = Tensor(np.load(f"{root}/emb.npy")).cast(dtypes.float16).realize()
+      ctx = ctx.cast(dtypes.float16).realize()
+      x   = Tensor(np.load(f"{root}/x.npy")).cast(dtypes.float16).realize()
 
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
@@ -301,23 +302,13 @@ class UNetModel:
          else: x = bb(x)
          return x
 
-      # saved_inputs = []
-      # for b in self.input_blocks:
-      #    for bb in b:
-      #       x = run(x, bb)
-      #    saved_inputs.append(x)
-      # for bb in self.middle_block:
-      #    x = run(x, bb)
-
       saved_inputs = []
-      x = Tensor(np.load(f"{root}/h.npy")).realize()
-      for i in range(1024):
-         filepath = f"{root}/{i}.npy"
-         if os.path.exists(filepath):
-            saved_inputs.append(Tensor(np.load(filepath)).realize())
-         else:
-            break
-
+      for b in self.input_blocks:
+         for bb in b:
+            x = run(x, bb)
+         saved_inputs.append(x)
+      for bb in self.middle_block:
+         x = run(x, bb)
       for b in self.output_blocks:
          x = x.cat(saved_inputs.pop(), dim=1)
          for bb in b:
@@ -1191,7 +1182,7 @@ if __name__ == "__main__":
    # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
 
    print("created samples")
-   x = model.decode(z)
+   x = model.decode(z).realize()
    print("decoded samples")
 
    # make image correct size and scale
