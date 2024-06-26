@@ -560,8 +560,11 @@ class FrozenClosedClipEmbedder(Embedder):
       self.input_key = "txt"
    
    def __call__(self, text:Tensor) -> Tensor:
-      tokens = self.tokenizer.encode(text)
-      return self.transformer.text_model(Tensor(tokens).reshape(1,-1))
+      # tokens = self.tokenizer.encode(text)
+      # return self.transformer.text_model(Tensor(tokens).reshape(1,-1))
+
+      global current_ctx
+      return Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/concat_emb/{current_ctx}_{self.input_key}_out.npy"))
 
 
 class Open:
@@ -679,7 +682,12 @@ class FrozenOpenClipEmbedder(Embedder):
       x = self.model.ln_final(x)
       pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
 
-      return pooled, penultimate
+      global current_ctx
+      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
+      penultimate = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_layer.npy"))
+      pooled      = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_pooled.npy")) 
+
+      return penultimate, pooled
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
