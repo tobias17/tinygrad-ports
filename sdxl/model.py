@@ -187,28 +187,6 @@ def timestep_embedding(timesteps:Tensor, dim:int, max_period=10000):
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
    args = timesteps.unsqueeze(1).cast(dtypes.float32) * freqs.unsqueeze(0)
    return Tensor.cat(args.cos(), args.sin(), dim=-1).cast(dtypes.float16)
-# def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-#    """
-#    Create sinusoidal timestep embeddings.
-#    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-#                      These may be fractional.
-#    :param dim: the dimension of the output.
-#    :param max_period: controls the minimum frequency of the embeddings.
-#    :return: an [N x dim] Tensor of positional embeddings.
-#    """
-#    half = dim // 2
-#    freqs = Tensor.exp(
-#       -math.log(max_period)
-#       * Tensor.arange(start=0, stop=half, dtype=dtypes.float32)
-#       / half
-#    )
-#    args = timesteps[:, None].cast(dtypes.float32) * freqs.unsqueeze(-1)
-#    embedding = Tensor.cat(Tensor.cos(args), Tensor.sin(args), dim=-1)
-#    if dim % 2:
-#       embedding = Tensor.cat(
-#          [embedding, Tensor.zeros_like(embedding[:, :1])], dim=-1
-#       )
-#    return embedding
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
@@ -512,18 +490,6 @@ class Closed:
          return hidden_states
 
 
-   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
-   class ClipEncoder:
-      def __init__(self, layer_run_count:Optional[int]=None):
-         self.layers = [Closed.ClipEncoderLayer() for i in range(12)]
-         self.layer_run_count = layer_run_count
-
-      def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
-         for l in self.layers[:self.layer_run_count]:
-            hidden_states = l(hidden_states, causal_attention_mask)
-         return hidden_states
-
-
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L386
    class ClipTextEmbeddings:
       def __init__(self):
@@ -534,22 +500,35 @@ class Closed:
          return self.token_embedding(input_ids) + self.position_embedding(position_ids)
 
 
+   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L377
+   class ClipEncoder:
+      def __init__(self, layer_count:int=12):
+         self.layers = [Closed.ClipEncoderLayer() for _ in range(layer_count)]
+
+      def __call__(self, x:Tensor, causal_attention_mask:Tensor, ret_layer_idx:Optional[int]=None) -> Tensor:
+         # the indexing of layers is NOT off by 1, the original code considers the "input" as the first hidden state
+         layers = self.layers if ret_layer_idx is None else self.layers[:ret_layer_idx]
+         for l in layers:
+            x = l(x, causal_attention_mask)
+         return x
+
+
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L394
    class ClipTextTransformer:
-      def __init__(self, layer_run_count:Optional[int]=None):
+      def __init__(self, ret_layer_idx:Optional[int]=None):
          self.embeddings       = Closed.ClipTextEmbeddings()
-         self.encoder          = Closed.ClipEncoder(layer_run_count)
+         self.encoder          = Closed.ClipEncoder()
          self.final_layer_norm = LayerNorm(768)
-         self.layer_run_count  = layer_run_count
+         self.ret_layer_idx    = ret_layer_idx
 
       def __call__(self, input_ids:Tensor) -> Tensor:
          x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
-         x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1))
-         return self.final_layer_norm(x) if self.layer_run_count is None else x
+         x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1), self.ret_layer_idx)
+         return self.final_layer_norm(x) if (self.ret_layer_idx is None) else x
    
    class ClipTextModel:
       def __init__(self):
-         self.text_model = Closed.ClipTextTransformer(layer_run_count=11+1)
+         self.text_model = Closed.ClipTextTransformer(ret_layer_idx=11)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
@@ -560,10 +539,11 @@ class FrozenClosedClipEmbedder(Embedder):
       self.input_key = "txt"
    
    def __call__(self, text:Tensor) -> Tensor:
-      # tokens = self.tokenizer.encode(text)
-      # return self.transformer.text_model(Tensor(tokens).reshape(1,-1))
-
       global current_ctx
+      # tokens = self.tokenizer.encode(text)
+      tokens = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/concat_emb/{current_ctx}_{self.input_key}_tokens.npy"))
+      return self.transformer.text_model(tokens.reshape(1,-1))
+
       return Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/concat_emb/{current_ctx}_{self.input_key}_out.npy"))
 
 
@@ -1160,7 +1140,7 @@ if __name__ == "__main__":
          orig_v = orig_d[k].numpy()
          diff = np.abs(inj_v - orig_v)
          mean = np.mean(diff)
-         print(f"{name} {k} mean={mean}")
+         print(f"{name:<2s} {k:<10s} | mean {mean:.4f} | inj_v {np.mean(inj_v):.4f} | orig_v {np.mean(orig_v):.4f} |")
    print("end")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
