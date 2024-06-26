@@ -724,7 +724,7 @@ class Conditioner:
    def get_keys(self) -> Set[str]:
       return set(e.input_key for e in self.embedders)
    
-   def __call__(self, batch:Dict) -> Dict[str,Tensor]:
+   def __call__(self, batch:Dict, force_zero_embeddings:List=[]) -> Dict[str,Tensor]:
       output: Dict[str,Tensor] = {}
 
       for embedder in self.embedders:
@@ -736,9 +736,12 @@ class Conditioner:
             assert isinstance(emb_out, (list, tuple))
 
          for emb in emb_out:
+            if embedder.input_key in force_zero_embeddings:
+               emb = Tensor.zeros_like(emb)
+
             out_key = self.OUTPUT_DIM2KEYS[len(emb.shape)]
             if out_key in output:
-               output[out_key] = output[out_key].cat(emb, dim=self.KEY2CATDIM[out_key])
+               output[out_key] = Tensor.cat(output[out_key], emb, dim=self.KEY2CATDIM[out_key])
             else:
                output[out_key] = emb
 
@@ -1140,7 +1143,7 @@ if __name__ == "__main__":
    current_ctx = "c"
    c  = model.conditioner(batch_c)
    current_ctx = "uc"
-   uc = model.conditioner(batch_uc)
+   uc = model.conditioner(batch_uc, force_zero_embeddings=["txt"])
    del model.conditioner
 
    for v in c .values(): v.realize()
