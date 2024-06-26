@@ -539,12 +539,8 @@ class FrozenClosedClipEmbedder(Embedder):
       self.input_key = "txt"
    
    def __call__(self, text:Tensor) -> Tensor:
-      global current_ctx
-      # tokens = self.tokenizer.encode(text)
-      tokens = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/concat_emb/{current_ctx}_{self.input_key}_tokens.npy"))
+      tokens = Tensor(self.tokenizer.encode(text))
       return self.transformer.text_model(tokens.reshape(1,-1))
-
-      return Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/concat_emb/{current_ctx}_{self.input_key}_out.npy"))
 
 
 class Open:
@@ -1140,7 +1136,7 @@ if __name__ == "__main__":
          orig_v = orig_d[k].numpy()
          diff = np.abs(inj_v - orig_v)
          mean = np.mean(diff)
-         print(f"{name:<2s} {k:<10s} | mean {mean:.4f} | inj_v {np.mean(inj_v):.4f} | orig_v {np.mean(orig_v):.4f} |")
+         print(f"{name:<2s} {k:<9s} | mean {mean:.4f} | inj_v {np.mean(inj_v):.4f} | orig_v {np.mean(orig_v):.4f} |")
    print("end")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
