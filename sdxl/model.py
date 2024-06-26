@@ -668,10 +668,8 @@ class ConcatTimestepEmbedderND(Embedder):
 
    def __call__(self, x:Tensor):
       assert len(x.shape) == 2
-      b, _ = x.shape
-      x = x.flatten()
-      emb = timestep_embedding(x, self.outdim)
-      emb = emb.reshape((b,-1))
+      emb = timestep_embedding(x.flatten(), self.outdim)
+      emb = emb.reshape((x.shape[0],-1))
       return emb
 
 
@@ -1085,7 +1083,9 @@ if __name__ == "__main__":
    #    print(k)
    # assert False
 
-   load_state_dict(model, state_dict, strict=True, apply_fnx=(lambda x: x.cast(dtypes.float16)))
+   def apply_fnx(x:Tensor, k:str) -> Tensor:
+      return (x.cast(dtypes.float16) if (k.startswith("model.") or k.startswith("conditioner.")) else x)
+   load_state_dict(model, state_dict, strict=True, apply_fnx=apply_fnx)
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
@@ -1102,48 +1102,45 @@ if __name__ == "__main__":
    C = 4
    F = 8
 
-   # # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
-   # batch_c : Dict = {
-   #    "txt": pos_prompt,
-   #    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-   #    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-   #    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-   #    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   # }
-   # batch_uc: Dict = {
-   #    "txt": neg_prompt,
-   #    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-   #    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-   #    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-   #    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   # }
-   # print("starting batch creation")
-   # c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
-   # for v in c .values(): v.realize()
-   # for v in uc.values(): v.realize()
-   # print("created batches")
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
+   batch_c : Dict = {
+      "txt": pos_prompt,
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   }
+   batch_uc: Dict = {
+      "txt": neg_prompt,
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+   }
+   c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+   del model.conditioner
 
-   # del model.conditioner
+   for v in  c.values(): v.realize()
+   for v in uc.values(): v.realize()
+   print("created batches")
 
    root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
+   # c, uc = {}, {} # type: ignore
+   for f in os.listdir(root):
+      if "vector"    in f: continue
+      # if "crossattn" in f: continue
+      if f.startswith( "c_"):  c[f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
+      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
    shape = (N, C, img_height // F, img_width // F)
    randn = Tensor.randn(shape)
-
-   c, uc = {}, {} # type: ignore
-   for f in os.listdir(root):
-      if f.startswith("c_"):  c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
-      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
 
    def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
       return model.denoiser(model.model, x, sigma, c)
 
    sampler = DPMPP2MSampler(cfg_scale)
    z = sampler(denoiser, randn, c, uc, steps)
-
-   # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/samples_z.npy"))
-
    print("created samples")
    x = model.decode(z).realize()
    print("decoded samples")
@@ -1153,6 +1150,6 @@ if __name__ == "__main__":
    x = x.reshape(3,img_height,img_width).permute(1,2,0).clip(0,1)*255
    x = x.cast(dtypes.float32).realize().cast(dtypes.uint8)
    print(x.shape)
-   
+
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
    im.show()
