@@ -182,11 +182,33 @@ class UNet:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/util.py#L207
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L251
-def timestep_embedding(timesteps, dim, max_period=10000):
+def timestep_embedding(timesteps:Tensor, dim:int, max_period=10000):
    half = dim // 2
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
-   args = timesteps[:, None].cast(dtypes.float32) * freqs[None]
+   args = timesteps.unsqueeze(1).cast(dtypes.float32) * freqs.unsqueeze(0)
    return Tensor.cat(args.cos(), args.sin(), dim=-1).cast(dtypes.float16)
+# def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
+#    """
+#    Create sinusoidal timestep embeddings.
+#    :param timesteps: a 1-D Tensor of N indices, one per batch element.
+#                      These may be fractional.
+#    :param dim: the dimension of the output.
+#    :param max_period: controls the minimum frequency of the embeddings.
+#    :return: an [N x dim] Tensor of positional embeddings.
+#    """
+#    half = dim // 2
+#    freqs = Tensor.exp(
+#       -math.log(max_period)
+#       * Tensor.arange(start=0, stop=half, dtype=dtypes.float32)
+#       / half
+#    )
+#    args = timesteps[:, None].cast(dtypes.float32) * freqs.unsqueeze(-1)
+#    embedding = Tensor.cat(Tensor.cos(args), Tensor.sin(args), dim=-1)
+#    if dim % 2:
+#       embedding = Tensor.cat(
+#          [embedding, Tensor.zeros_like(embedding[:, :1])], dim=-1
+#       )
+#    return embedding
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
@@ -667,9 +689,13 @@ class ConcatTimestepEmbedderND(Embedder):
       self.input_key = input_key
 
    def __call__(self, x:Tensor):
+      global current_ctx
+      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
+      # x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in.npy"))
       assert len(x.shape) == 2
       emb = timestep_embedding(x.flatten(), self.outdim)
       emb = emb.reshape((x.shape[0],-1))
+      emb = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out.npy"))
       return emb
 
 
@@ -1040,7 +1066,6 @@ class DPMPP2MSampler:
       sigmas = self.discretization(num_steps)
       x *= Tensor.sqrt(1.0 + sigmas[0] ** 2.0)
       num_sigmas = len(sigmas)
-      s_in = Tensor.ones([x.shape[0]])
 
       old_denoised = None
       for i in trange(num_sigmas - 1):
@@ -1048,9 +1073,9 @@ class DPMPP2MSampler:
             old_denoised.realize()
          x, old_denoised = self.sampler_step(
             old_denoised=old_denoised,
-            prev_sigma=(None if i==0 else s_in*sigmas[i-1]),
-            sigma=s_in*sigmas[i],
-            next_sigma=s_in*sigmas[i+1],
+            prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),
+            sigma=sigmas[i].reshape(x.shape[0]),
+            next_sigma=sigmas[i+1].reshape(x.shape[0]),
             denoiser=denoiser,
             x=x,
             c=c,
@@ -1060,6 +1085,7 @@ class DPMPP2MSampler:
 
       return x
 
+current_ctx = "c"
 
 if __name__ == "__main__":
    Tensor.no_grad = True
@@ -1069,20 +1095,6 @@ if __name__ == "__main__":
    state_dict = safe_load(weight_path)
 
    model = SDXL(configs["SDXL_Base"])
-
-   # model_keys = set(get_state_dict(model).keys())
-   # weight_keys = set(state_dict.keys())
-   # print(f"model_keys:  {len(model_keys)}")
-   # print(f"weight_keys: {len(weight_keys)}")
-   # print(f"intersect:   {len(model_keys.intersection(weight_keys))}")
-   # print("\nModel Only Keys:")
-   # for k in sorted(model_keys.difference(weight_keys)):
-   #    print(k)
-   # print("\nWeight Only Keys:")
-   # for k in sorted(weight_keys.difference(model_keys)):
-   #    print(k)
-   # assert False
-
    def apply_fnx(x:Tensor, k:str) -> Tensor:
       return (x.cast(dtypes.float16) if (k.startswith("model.") or k.startswith("conditioner.")) else x)
    load_state_dict(model, state_dict, strict=True, apply_fnx=apply_fnx)
@@ -1117,20 +1129,32 @@ if __name__ == "__main__":
       "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
-   c, uc = model.conditioner(batch_c), model.conditioner(batch_uc)
+   current_ctx = "c"
+   c  = model.conditioner(batch_c)
+   current_ctx = "uc"
+   uc = model.conditioner(batch_uc)
    del model.conditioner
 
-   for v in  c.values(): v.realize()
+   for v in c .values(): v.realize()
    for v in uc.values(): v.realize()
    print("created batches")
 
    root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
-   # c, uc = {}, {} # type: ignore
+   inj_c, inj_uc = {}, {} # type: ignore
    for f in os.listdir(root):
-      if "vector"    in f: continue
+      # if "vector"    in f: continue
       # if "crossattn" in f: continue
-      if f.startswith( "c_"):  c[f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
-      if f.startswith("uc_"): uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
+      if f.startswith("c_" ): inj_c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
+      if f.startswith("uc_"): inj_uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
+
+   for inj_d, orig_d, name in [(inj_c, c, "c"), (inj_uc, uc, "uc")]:
+      for k in inj_d:
+         inj_v  = inj_d[k].numpy()
+         orig_v = orig_d[k].numpy()
+         diff = np.abs(inj_v - orig_v)
+         mean = np.mean(diff)
+         print(f"{name} {k} mean={mean}")
+   print("end")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
    shape = (N, C, img_height // F, img_width // F)
