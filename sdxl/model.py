@@ -697,13 +697,9 @@ class ConcatTimestepEmbedderND(Embedder):
       self.input_key = input_key
 
    def __call__(self, x:Tensor):
-      global current_ctx
-      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
-      # x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in.npy"))
       assert len(x.shape) == 2
       emb = timestep_embedding(x.flatten(), self.outdim)
       emb = emb.reshape((x.shape[0],-1))
-      emb = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out.npy"))
       return emb
 
 
