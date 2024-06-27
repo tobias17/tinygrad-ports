@@ -8,12 +8,12 @@ from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from tinygrad import TinyJit
+from tinygrad import TinyJit # type: ignore
 from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
 from abc import ABC, abstractmethod
 from functools import lru_cache
 import os, math, re, gzip
-from tqdm import trange
+from tqdm import trange # type: ignore
 from PIL import Image # type: ignore
 import numpy as np
 
@@ -564,7 +564,7 @@ class Open:
          proj = x.linear(self.in_proj_weight.T, self.in_proj_bias)
          proj = proj.unflatten(-1, (3,C)).unsqueeze(0).transpose(0,-2)
          q,k,v = proj.chunk(3)
-         
+
          q,k,v = [y.reshape(T, B*self.n_heads, self.d_head).transpose(0, 1).reshape(B, self.n_heads, T, self.d_head) for y in (q,k,v)]
 
          attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -663,19 +663,10 @@ class FrozenOpenClipEmbedder(Embedder):
       tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
       tokens = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_tokens.npy"))
 
-      x = self.model.token_embedding(tokens)
-      x = x + self.model.positional_embedding
-      x = x.permute(1,0,2)
-      x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_pre_transformer.npy"))
-
+      x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
-      # x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_post_transformer.npy"))
-
       x = self.model.ln_final(x)
       pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
-
-      penultimate = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_layer.npy"))
-      # pooled      = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_pooled.npy")) 
 
       return penultimate, pooled
 
