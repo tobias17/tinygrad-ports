@@ -424,7 +424,7 @@ class Closed:
          self.cache[token] = word
          return word
 
-      def encode(self, text):
+      def encode(self, text:str, pad_with_zeros:bool=False):
          bpe_tokens = []
          text = Closed.whitespace_clean(text.strip()).lower()
          for token in re.findall(self.pat, text):
@@ -433,7 +433,7 @@ class Closed:
          # Truncation, keeping two slots for start and end tokens.
          if len(bpe_tokens) > 75:
             bpe_tokens = bpe_tokens[:75]
-         return [49406] + bpe_tokens + [49407] * (77 - len(bpe_tokens) - 1)
+         return [49406] + bpe_tokens + [49407] + ([0] if pad_with_zeros else [49407]) * (77 - len(bpe_tokens) - 2)
 
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L329
@@ -657,11 +657,7 @@ class FrozenOpenClipEmbedder(Embedder):
       return x.permute(1,0,2), penultimate.permute(1,0,2)
 
    def __call__(self, text:Tensor) -> Tensor:
-      global current_ctx
-      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
-
-      tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
-      tokens = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_tokens.npy"))
+      tokens = Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1)
 
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
       x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
@@ -1089,7 +1085,8 @@ if __name__ == "__main__":
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
-   pos_prompt = "a horse sized cat eating a bagel"
+   # pos_prompt = "a horse sized cat eating a bagel"
+   pos_prompt = "an astronaut riding a skateboard on the moon"
    neg_prompt = ""
    img_width  = 1024
    img_height = 1024
@@ -1126,22 +1123,6 @@ if __name__ == "__main__":
    for v in c .values(): v.realize()
    for v in uc.values(): v.realize()
    print("created batches")
-
-   root = "/home/tobi/repos/tinygrad-ports/weights/inputs"
-   inj_c, inj_uc = {}, {} # type: ignore
-   for f in os.listdir(root):
-      # if "vector"    in f: continue
-      # if "crossattn" in f: continue
-      if f.startswith("c_" ): inj_c [f.replace("c_", "").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
-      if f.startswith("uc_"): inj_uc[f.replace("uc_","").split(".")[0]] = Tensor(np.load(f"{root}/{f}")).realize()
-
-   for inj_d, orig_d, name in [(inj_c, c, "c"), (inj_uc, uc, "uc")]:
-      for k in inj_d:
-         inj_v  = inj_d[k].numpy()
-         orig_v = orig_d[k].numpy()
-         mean = np.mean(np.abs(inj_v - orig_v))
-         print(f"{name:<2s} {k:<9s} | mean {mean:.4f} | inj_v {np.mean(np.abs(inj_v)):.4f} | orig_v {np.mean(np.abs(orig_v)):.4f} |")
-   print("end")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
    shape = (N, C, img_height // F, img_width // F)
