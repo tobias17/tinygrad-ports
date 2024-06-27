@@ -560,10 +560,20 @@ class Open:
 
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
          T,B,C = x.shape
-         q,k,v = [x.linear(w,b) for w,b in zip(self.in_proj_weight.chunk(3),self.in_proj_bias.chunk(3))]
+         
+         proj = x.linear(self.in_proj_weight.T, self.in_proj_bias)
+         proj = proj.unflatten(-1, (3,C)).unsqueeze(0).transpose(0,-2)
+         q,k,v = proj.chunk(3)
+         
          q,k,v = [y.reshape(T, B*self.n_heads, self.d_head).transpose(0, 1).reshape(B, self.n_heads, T, self.d_head) for y in (q,k,v)]
+
          attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-         return self.out_proj(attn_output.permute(2,0,1,3).reshape(B*T, C)).reshape(T, B, C)
+         attn_output = attn_output.permute(2,0,1,3).reshape(B*T, C)
+
+         attn_output = self.out_proj(attn_output)
+         attn_output = attn_output.reshape(T, B, C)
+
+         return attn_output
 
 
    class Mlp:
@@ -608,7 +618,7 @@ class Open:
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
    # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
    class ClipTextTransformer:
-      def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=16, ctx_length:int=77, layers:int=32):
+      def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=20, ctx_length:int=77, layers:int=32):
          self.token_embedding = Embedding(vocab_size, dims)
          self.positional_embedding = Tensor.empty(ctx_length, dims)
          self.transformer = Open.ClipTransformer(dims, layers, n_heads)
@@ -653,11 +663,13 @@ class FrozenOpenClipEmbedder(Embedder):
       tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
       tokens = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_tokens.npy"))
 
-      x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
+      x = self.model.token_embedding(tokens)
+      x = x + self.model.positional_embedding
+      x = x.permute(1,0,2)
       x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_pre_transformer.npy"))
 
       x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
-      x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_post_transformer.npy"))
+      # x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_post_transformer.npy"))
 
       x = self.model.ln_final(x)
       pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
@@ -1136,9 +1148,8 @@ if __name__ == "__main__":
       for k in inj_d:
          inj_v  = inj_d[k].numpy()
          orig_v = orig_d[k].numpy()
-         diff = np.abs(inj_v - orig_v)
-         mean = np.mean(diff)
-         print(f"{name:<2s} {k:<9s} | mean {mean:.4f} | inj_v {np.mean(inj_v):.4f} | orig_v {np.mean(orig_v):.4f} |")
+         mean = np.mean(np.abs(inj_v - orig_v))
+         print(f"{name:<2s} {k:<9s} | mean {mean:.4f} | inj_v {np.mean(np.abs(inj_v)):.4f} | orig_v {np.mean(np.abs(orig_v)):.4f} |")
    print("end")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
