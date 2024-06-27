@@ -559,12 +559,11 @@ class Open:
          self.out_proj = Linear(dims, dims)
 
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-         q_b, k_b, v_b = self.in_proj_bias  .chunk(3, dim=0)
-         q_w, k_w, v_w = self.in_proj_weight.chunk(3, dim=0)
-         q,k,v = x.linear(q_w.transpose(), q_b), x.linear(k_w.transpose(), k_b), x.linear(v_w.transpose(), v_b)
-         q,k,v = [y.reshape(x.shape[0], -1, self.n_heads, self.d_head).transpose(0, 2) for y in (q,k,v)]
+         T,B,C = x.shape
+         q,k,v = [x.linear(w,b) for w,b in zip(self.in_proj_weight.chunk(3),self.in_proj_bias.chunk(3))]
+         q,k,v = [y.reshape(T, B*self.n_heads, self.d_head).transpose(0, 1).reshape(B, self.n_heads, T, self.d_head) for y in (q,k,v)]
          attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-         return self.out_proj(attn_output.transpose(0, 2).reshape(x.shape))
+         return self.out_proj(attn_output.permute(2,0,1,3).reshape(B*T, C)).reshape(T, B, C)
 
 
    class Mlp:
@@ -586,8 +585,8 @@ class Open:
          self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
       
       def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-         x = x + x.sequential([self.ln_1, lambda z: self.attn(z, attn_mask)])
-         x = x + x.sequential([self.ln_2, self.mlp])
+         x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
+         x = x + self.mlp(self.ln_2(x))
          return x
 
 
@@ -643,25 +642,28 @@ class FrozenOpenClipEmbedder(Embedder):
       self.tokenizer = Closed.ClipTokenizer()
    
    def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
-      penultimate = None
-      for i, r in enumerate(self.model.transformer.resblocks):
-         if i == len(self.model.transformer.resblocks) - 1:
-            penultimate = x
-         x = r(x, attn_mask=attn_mask)
-      assert penultimate is not None, "should have saved a penultimate"
+      for r in self.model.transformer.resblocks:
+         x, penultimate = r(x, attn_mask=attn_mask), x
       return x.permute(1,0,2), penultimate.permute(1,0,2)
 
    def __call__(self, text:Tensor) -> Tensor:
+      global current_ctx
+      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
+
       tokens = Tensor(self.tokenizer.encode(text)).reshape(1,-1)
+      tokens = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_tokens.npy"))
+
       x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
+      x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_pre_transformer.npy"))
+
       x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
+      x = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_in_post_transformer.npy"))
+
       x = self.model.ln_final(x)
       pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
 
-      global current_ctx
-      root = "/home/tobi/repos/tinygrad-ports/weights/concat_emb"
       penultimate = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_layer.npy"))
-      pooled      = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_pooled.npy")) 
+      # pooled      = Tensor(np.load(f"{root}/{current_ctx}_{self.input_key}_out_pooled.npy")) 
 
       return penultimate, pooled
 
