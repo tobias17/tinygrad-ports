@@ -886,9 +886,7 @@ class FirstStageModel:
       self.post_quant_conv = Conv2d(embed_dim, kwargs["z_ch"], 1)
 
    def decode(self, z:Tensor) -> Tensor:
-      dec = self.post_quant_conv(z)
-      dec = self.decoder(dec)
-      return dec
+      return z.sequential([self.post_quant_conv, self.decoder])
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/discretizer.py#L42
@@ -910,7 +908,7 @@ class LegacyDDPMDiscretization:
       return sigmas if flip else sigmas.flip(axis=0) # sigmas is "pre-flipped", need to do oposite of flag
 
 
-def expand_dims(x:Tensor, t:Tensor) -> Tensor:
+def append_dims(x:Tensor, t:Tensor) -> Tensor:
    dims_to_append = len(t.shape) - len(x.shape)
    assert dims_to_append >= 0
    return x.reshape(x.shape + (1,)*dims_to_append)
@@ -928,6 +926,24 @@ class SDXL:
       self.discretization = LegacyDDPMDiscretization()
       self.sigmas = self.discretization(config["denoiser"]["num_idx"], flip=True).numpy()
 
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
+   def create_conditioning(self, pos_prompt:str, neg_prompt:str, img_width:int, img_height:int) -> Tuple[Dict,Dict]:
+      batch_c : Dict = {
+         "txt": pos_prompt,
+         "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+         "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+         "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+         "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+      }
+      batch_uc: Dict = {
+         "txt": neg_prompt,
+         "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+         "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+         "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+         "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+      }
+      return model.conditioner(batch_c), model.conditioner(batch_uc, force_zero_embeddings=["txt"])
+
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
    def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
 
@@ -937,7 +953,7 @@ class SDXL:
 
       sigma = Tensor(self.sigmas)[sigma_to_idx(sigma)]
       sigma_shape = sigma.shape
-      sigma = expand_dims(sigma, x)
+      sigma = append_dims(sigma, x)
 
       c_out   = (-sigma).cast(dtypes.float16)
       c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
@@ -954,19 +970,6 @@ class SDXL:
       return self.first_stage_model.decode(1.0 / self.scale_factor * x)
 
 
-def fp16(x:Optional[Tensor]) -> Optional[Tensor]:
-   if x is None:
-      return x
-   return x
-   return x.cast(dtypes.float16) # .realize()
-
-def real(x:Optional[Tensor]) -> Optional[Tensor]:
-   if x is None:
-      return x
-   return x.realize()
-
-
-
 class VanillaCFG:
    def __init__(self, scale:float):
       self.scale = scale
@@ -975,8 +978,8 @@ class VanillaCFG:
       c_out = {}
       for k in c:
          assert k in ["vector", "crossattn", "concat"]
-         c_out[k] = fp16(Tensor.cat(uc[k], c[k], dim=0))
-      return fp16(Tensor.cat(x, x)), fp16(Tensor.cat(s, s)), c_out
+         c_out[k] = Tensor.cat(uc[k], c[k], dim=0)
+      return Tensor.cat(x, x), Tensor.cat(s, s), c_out
 
    def __call__(self, x:Tensor, sigma:float) -> Tensor:
       x_u, x_c = x.chunk(2)
@@ -992,12 +995,6 @@ class DPMPP2MSampler:
       self.guider = VanillaCFG(cfg_scale)
 
    def sampler_step(self, old_denoised:Optional[Tensor], prev_sigma:Optional[Tensor], sigma:Tensor, next_sigma:Tensor, denoiser, x:Tensor, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor]:
-      old_denoised = fp16(old_denoised)
-      prev_sigma   = fp16(prev_sigma)
-      sigma        = fp16(sigma)
-      next_sigma   = fp16(next_sigma)
-      x            = fp16(x)
-
       denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c, uc))
       denoised = self.guider(denoised, sigma)
 
@@ -1008,7 +1005,7 @@ class DPMPP2MSampler:
       mults = [t_next.neg().exp()/t.neg().exp(), (-h).exp().sub(1)]
       if r is not None:
          mults.extend([1 + 1/(2*r), 1/(2*r)])
-      mults = [expand_dims(m, x) for m in mults]
+      mults = [append_dims(m, x) for m in mults]
 
       x_standard = mults[0]*x - mults[1]*denoised
       if (old_denoised is None) or (next_sigma.sum().numpy().item() < 1e-14):
@@ -1016,7 +1013,7 @@ class DPMPP2MSampler:
 
       denoised_d = mults[2]*denoised - mults[3]*old_denoised
       x_advanced = mults[0]*x        - mults[1]*denoised_d
-      x = Tensor.where(expand_dims(next_sigma, x) > 0.0, x_advanced, x_standard)
+      x = Tensor.where(append_dims(next_sigma, x) > 0.0, x_advanced, x_standard)
       return x, denoised
 
    def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
@@ -1026,8 +1023,6 @@ class DPMPP2MSampler:
 
       old_denoised = None
       for i in trange(num_sigmas - 1):
-         if old_denoised is not None:
-            old_denoised.realize()
          x, old_denoised = self.sampler_step(
             old_denoised=old_denoised,
             prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),
@@ -1039,6 +1034,7 @@ class DPMPP2MSampler:
             uc=uc,
          )
          x.realize()
+         old_denoised.realize()
 
       return x
 
@@ -1071,25 +1067,8 @@ if __name__ == "__main__":
    C = 4
    F = 8
 
-   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
-   batch_c : Dict = {
-      "txt": pos_prompt,
-      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   }
-   batch_uc: Dict = {
-      "txt": neg_prompt,
-      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-   }
-   c  = model.conditioner(batch_c)
-   uc = model.conditioner(batch_uc, force_zero_embeddings=["txt"])
+   c, uc = model.create_conditioning(pos_prompt, neg_prompt, img_width, img_height)
    del model.conditioner
-
    for v in c .values(): v.realize()
    for v in uc.values(): v.realize()
    print("created batches")
