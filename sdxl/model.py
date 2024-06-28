@@ -916,56 +916,6 @@ def expand_dims(x:Tensor, t:Tensor) -> Tensor:
    return x.reshape(x.shape + (1,)*dims_to_append)
 
 
-
-# @TinyJit
-# def run(model, input, tms, ctx, y, c_out, add):
-#    return (model(input, tms, ctx, y)*c_out + add).realize()
-
-# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
-class Denoiser:
-   def __init__(self, num_idx:int):
-      self.discretization = LegacyDDPMDiscretization()
-      self.scaling = Denoiser.eps_scaling
-      self.num_idx = num_idx
-   
-   @staticmethod
-   def eps_scaling(sigma:Tensor) -> Tuple[Tensor,Tensor,Tensor,Tensor]:
-      c_skip  = Tensor.ones_like(sigma).cast(dtypes.float16)
-      c_out   = (-sigma).cast(dtypes.float16)
-      c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
-      c_noise = sigma.cast(dtypes.float16)
-      return c_skip, c_out, c_in, c_noise
-
-   _sigmas = None
-   @property
-   def sigmas(self) -> Tensor:
-      if self._sigmas is None:
-         self._sigmas = self.discretization(self.num_idx, flip=True)
-      return self._sigmas
-
-   def sigma_to_idx(self, sigma:Tensor) -> Tensor:
-      dists = sigma - self.sigmas[:, None]
-      return dists.abs().argmin(axis=0).view(*sigma.shape)
-
-   def idx_to_sigma(self, idx:Union[Tensor,int]) -> Tensor:
-      return self.sigmas[idx]
-
-   def __call__(self, model, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
-      sigma = self.idx_to_sigma(self.sigma_to_idx(sigma))
-      sigma_shape = sigma.shape
-      sigma = expand_dims(sigma, x)
-      c_skip, c_out, c_in, c_noise = self.scaling(sigma)
-      c_noise = self.sigma_to_idx(c_noise.reshape(sigma_shape))
-      
-      def prep(*tensors:Tensor):
-         return tuple(t.cast(dtypes.float16).realize() for t in tensors)
-      
-      # return run(model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip))
-
-      input, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x*c_skip)
-      return model(input, tms, ctx, y)*c_out + add
-
-
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
    scale_factor: float = 0.13025
@@ -974,7 +924,30 @@ class SDXL:
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
       self.model = DiffusionModel(**config["model"])
-      self.denoiser = Denoiser(**config["denoiser"])
+
+      self.discretization = LegacyDDPMDiscretization()
+      self.sigmas = self.discretization(config["denoiser"]["num_idx"], flip=True).numpy()
+
+   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
+   def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+
+      def sigma_to_idx(s:Tensor) -> Tensor:
+         dists = s - Tensor(self.sigmas).unsqueeze(1)
+         return dists.abs().argmin(axis=0).view(*s.shape)
+
+      sigma = Tensor(self.sigmas)[sigma_to_idx(sigma)]
+      sigma_shape = sigma.shape
+      sigma = expand_dims(sigma, x)
+
+      c_out   = (-sigma).cast(dtypes.float16)
+      c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
+      c_noise = sigma_to_idx(sigma.reshape(sigma_shape)).cast(dtypes.float16)
+
+      def prep(*tensors:Tensor):
+         return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
+      x, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x)
+      return self.model(x, tms, ctx, y)*c_out + add
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
@@ -1069,7 +1042,6 @@ class DPMPP2MSampler:
 
       return x
 
-current_ctx = "c"
 
 if __name__ == "__main__":
    Tensor.no_grad = True
@@ -1114,9 +1086,7 @@ if __name__ == "__main__":
       "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
       "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
    }
-   current_ctx = "c"
    c  = model.conditioner(batch_c)
-   current_ctx = "uc"
    uc = model.conditioner(batch_uc, force_zero_embeddings=["txt"])
    del model.conditioner
 
@@ -1128,11 +1098,8 @@ if __name__ == "__main__":
    shape = (N, C, img_height // F, img_width // F)
    randn = Tensor.randn(shape)
 
-   def denoiser(x:Tensor, sigma:Tensor, c:Dict) -> Tensor:
-      return model.denoiser(model.model, x, sigma, c)
-
    sampler = DPMPP2MSampler(cfg_scale)
-   z = sampler(denoiser, randn, c, uc, steps)
+   z = sampler(model.denoise, randn, c, uc, steps)
    print("created samples")
    x = model.decode(z).realize()
    print("decoded samples")
