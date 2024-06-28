@@ -19,6 +19,7 @@ from pathlib import Path
 from tqdm import trange # type: ignore
 from PIL import Image # type: ignore
 
+
 # configs:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_refiner.yaml
@@ -1049,12 +1050,13 @@ class DPMPP2MSampler:
 if __name__ == "__main__":
    parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
    parser.add_argument('--steps',    type=int,   default=5, help="The number of diffusion steps")
-   parser.add_argument('--prompt',   type=str,   default="a horse size cat eating a bagle", help="Description of image to generate")
+   parser.add_argument('--prompt',   type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
    parser.add_argument('--out',      type=str,   default=Path(tempfile.gettempdir()) / "rendered.png", help="Output filename")
-   parser.add_argument('--seed',     type=int,   default=0, help="Set the random latent seed")
+   parser.add_argument('--seed',     type=int,   help="Set the random latent seed")
    parser.add_argument('--guidance', type=float, default=6.0, help="Prompt strength")
    parser.add_argument('--width',    type=int,   default=1024, help="The output image width")
    parser.add_argument('--height',   type=int,   default=1024, help="The output image height")
+   parser.add_argument('--weights',  type=str,   help="Custom path to weights")
    parser.add_argument('--noshow',   action='store_true', help="Don't show the image")
    args = parser.parse_args()
 
@@ -1063,7 +1065,9 @@ if __name__ == "__main__":
       Tensor.manual_seed(args.seed)
 
    model = SDXL(configs["SDXL_Base"])
-   weights = fetch('https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors', 'sd_xl_base_1.0.safetensors')
+
+   default_weight_url = 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors'
+   weights = args.weights if args.weights else fetch(default_weight_url, 'sd_xl_base_1.0.safetensors')
    load_state_dict(model, safe_load(weights), strict=True)
 
    N = 1
@@ -1097,5 +1101,7 @@ if __name__ == "__main__":
 
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
    print(f"saving {args.out}")
+   im.save(args.out)
+
    if not args.noshow:
       im.show()
