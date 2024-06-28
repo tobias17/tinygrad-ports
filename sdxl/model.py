@@ -129,9 +129,9 @@ class UNet:
          self.norm3 = LayerNorm(dim)
 
       def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
-         x = self.attn1(self.norm1(x)) + x
-         x = self.attn2(self.norm2(x), ctx=ctx) + x
-         x = self.ff(self.norm3(x)) + x
+         x = x + self.attn1(self.norm1(x))
+         x = x + self.attn2(self.norm2(x), ctx=ctx)
+         x = x + self.ff(self.norm3(x))
          return x
 
 
@@ -150,15 +150,15 @@ class UNet:
          self.proj_out = Linear(n_heads * d_head, channels)
 
       def __call__(self, x:Tensor, ctx:Optional[Tensor]=None) -> Tensor:
-         b, c, h, w = x.shape
+         B, C, H, W = x.shape
          x_in = x
          x = self.norm(x)
-         x = x.reshape(b, c, h*w).permute(0,2,1) # b c h w -> b c (h w) -> b (h w) c
+         x = x.reshape(B, C, H*W).permute(0,2,1) # b c h w -> b c (h w) -> b (h w) c
          x = self.proj_in(x)
          for block in self.transformer_blocks:
             x = block(x, ctx=ctx)
          x = self.proj_out(x)
-         x = x.permute(0,2,1).reshape(b, c, h, w) # b (h w) c -> b c (h w) -> b c h w
+         x = x.permute(0,2,1).reshape(B, C, H, W) # b (h w) c -> b c (h w) -> b c h w
          return x + x_in
 
 
@@ -187,7 +187,7 @@ class UNet:
 def timestep_embedding(timesteps:Tensor, dim:int, max_period=10000):
    half = dim // 2
    freqs = (-math.log(max_period) * Tensor.arange(half) / half).exp()
-   args = timesteps.unsqueeze(1).cast(dtypes.float32) * freqs.unsqueeze(0)
+   args = timesteps.unsqueeze(1) * freqs.unsqueeze(0)
    return Tensor.cat(args.cos(), args.sin(), dim=-1).cast(dtypes.float16)
 
 
@@ -282,14 +282,14 @@ class UNetModel:
 
    def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
       t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
-      emb = t_emb.sequential(self.time_embed)
+      emb   = t_emb.sequential(self.time_embed)
 
       assert y.shape[0] == x.shape[0]
       emb = emb + y.sequential(self.label_emb[0])
 
-      emb = emb.cast(dtypes.float16).realize()
-      ctx = ctx.cast(dtypes.float16).realize()
-      x = x.cast(dtypes.float16).realize()
+      emb = emb.cast(dtypes.float16)
+      ctx = ctx.cast(dtypes.float16)
+      x   = x  .cast(dtypes.float16)
 
       def run(x:Tensor, bb) -> Tensor:
          if isinstance(bb, UNet.ResBlock): x = bb(x, emb)
@@ -356,10 +356,11 @@ class Tokenizer:
             n += 1
       cs = [chr(n) for n in cs]
       return dict(zip(bs, cs))
-   # Clip tokenizer, taken from https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py (MIT license)
    @lru_cache()
    @staticmethod
-   def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
+   def default_bpe():
+      # Clip tokenizer, taken from https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py (MIT license)
+      return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
    class ClipTokenizer:
       def __init__(self):
          self.byte_encoder = Tokenizer.bytes_to_unicode()
@@ -417,7 +418,7 @@ class Tokenizer:
          return word
 
       def encode(self, text:str, pad_with_zeros:bool=False):
-         bpe_tokens = []
+         bpe_tokens: List[int] = []
          text = Tokenizer.whitespace_clean(text.strip()).lower()
          for token in re.findall(self.pat, text):
             token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
@@ -447,11 +448,11 @@ class Closed:
          self.fc1 = Linear(768, 3072)
          self.fc2 = Linear(3072, 768)
 
-      def __call__(self, hidden_states):
-         hidden_states = self.fc1(hidden_states)
-         hidden_states = hidden_states.quick_gelu()
-         hidden_states = self.fc2(hidden_states)
-         return hidden_states
+      def __call__(self, h:Tensor) -> Tensor:
+         h = self.fc1(h)
+         h = h.quick_gelu()
+         h = self.fc2(h)
+         return h
 
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L340
@@ -465,7 +466,7 @@ class Closed:
          self.q_proj = Linear(self.embed_dim, self.embed_dim)
          self.out_proj = Linear(self.embed_dim, self.embed_dim)
 
-      def __call__(self, hidden_states, causal_attention_mask):
+      def __call__(self, hidden_states:Tensor, causal_attention_mask:Tensor) -> Tensor:
          bsz, tgt_len, embed_dim = hidden_states.shape
          q,k,v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
          q,k,v = [x.reshape(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2) for x in (q,k,v)]
@@ -688,7 +689,7 @@ class ConcatTimestepEmbedderND(Embedder):
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
 class Conditioner:
    OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat", 5: "concat"}
-   KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
+   KEY2CATDIM      = {"vector": 1, "crossattn": 2, "concat": 1}
    embedders: List[Embedder]
 
    def __init__(self, concat_embedders:List[str]):
@@ -773,12 +774,12 @@ class FirstStage:
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/model.py#L204
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L17
    class AttnBlock:
-      def __init__(self, in_channels):
-         self.norm = GroupNorm(32, in_channels)
-         self.q = Conv2d(in_channels, in_channels, 1)
-         self.k = Conv2d(in_channels, in_channels, 1)
-         self.v = Conv2d(in_channels, in_channels, 1)
-         self.proj_out = Conv2d(in_channels, in_channels, 1)
+      def __init__(self, dim:int):
+         self.norm = GroupNorm(32, dim)
+         self.q = Conv2d(dim, dim, 1)
+         self.k = Conv2d(dim, dim, 1)
+         self.v = Conv2d(dim, dim, 1)
+         self.proj_out = Conv2d(dim, dim, 1)
 
       # copied from AttnBlock in ldm repo
       def __call__(self, x:Tensor) -> Tensor:
@@ -806,7 +807,7 @@ class FirstStage:
          in_ch_mult = (1,) + tuple(ch_mult)
 
          class BlockEntry:
-            def __init__(self, block:List[FirstStage.ResnetBlock], downsample:Callable[[Tensor],Tensor]):
+            def __init__(self, block:List[FirstStage.ResnetBlock], downsample):
                self.block = block
                self.downsample = downsample
          self.down: List[BlockEntry] = []
@@ -819,8 +820,8 @@ class FirstStage:
                block_in = block_out
             
             downsample = tensor_identity if (i_level == len(ch_mult)-1) else FirstStage.Downsample(block_in)
-            self.down.append(BlockEntry(block, downsample)) # type: ignore
-         
+            self.down.append(BlockEntry(block, downsample))
+
          self.mid = FirstStage.MidEntry(block_in)
 
          self.norm_out = GroupNorm(32, block_in)
@@ -868,7 +869,6 @@ class FirstStage:
          self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
       
       def __call__(self, z:Tensor) -> Tensor:
-
          h = z.sequential([self.conv_in, self.mid.block_1, self.mid.attn_1, self.mid.block_2])
 
          for up in self.up[::-1]:
