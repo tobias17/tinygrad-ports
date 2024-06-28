@@ -313,9 +313,6 @@ class UNetModel:
 class DiffusionModel:
    def __init__(self, *args, **kwargs):
       self.diffusion_model = UNetModel(*args, **kwargs)
-   
-   def __call__(self, *args, **kwargs) -> Tensor:
-      return self.diffusion_model(*args, **kwargs)
 
 
 class Embedder(ABC):
@@ -914,6 +911,11 @@ def append_dims(x:Tensor, t:Tensor) -> Tensor:
    return x.reshape(x.shape + (1,)*dims_to_append)
 
 
+@TinyJit
+def run(model, x, tms, ctx, y, c_out, add):
+   return (model(x, tms, ctx, y)*c_out + add).realize()
+
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
    scale_factor: float = 0.13025
@@ -951,19 +953,21 @@ class SDXL:
          dists = s - Tensor(self.sigmas).unsqueeze(1)
          return dists.abs().argmin(axis=0).view(*s.shape)
 
-      sigma = Tensor(self.sigmas)[sigma_to_idx(sigma)]
+      sigma = Tensor(self.sigmas[sigma_to_idx(sigma).numpy()])
       sigma_shape = sigma.shape
       sigma = append_dims(sigma, x)
 
-      c_out   = (-sigma).cast(dtypes.float16)
-      c_in    = (1 / (sigma**2 + 1.0) ** 0.5).cast(dtypes.float16)
-      c_noise = sigma_to_idx(sigma.reshape(sigma_shape)).cast(dtypes.float16)
+      c_out   = -sigma
+      c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+      c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
       def prep(*tensors:Tensor):
          return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-      x, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x)
-      return self.model(x, tms, ctx, y)*c_out + add
+      # x, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x)
+      # return self.model(x, tms, ctx, y)*c_out + add
+
+      return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
