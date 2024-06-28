@@ -1050,10 +1050,12 @@ if __name__ == "__main__":
    weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
    state_dict = safe_load(weight_path)
 
+   for k, v in state_dict.items():
+      if k.startswith("model.") or k.startswith("conditioner."):
+         v = v.cast(dtypes.float16)
+
    model = SDXL(configs["SDXL_Base"])
-   def apply_fnx(x:Tensor, k:str) -> Tensor:
-      return (x.cast(dtypes.float16) if (k.startswith("model.") or k.startswith("conditioner.")) else x)
-   load_state_dict(model, state_dict, strict=True, apply_fnx=apply_fnx)
+   load_state_dict(model, state_dict, strict=True)
 
    # sampling params
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
