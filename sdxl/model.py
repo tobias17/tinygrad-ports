@@ -6,16 +6,18 @@
 
 from tinygrad.tensor import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm, Embedding # type: ignore
-from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from tinygrad import TinyJit # type: ignore
+import numpy as np
+
 from typing import Dict, List, Union, Callable, Optional, Any, Set, Tuple
+import os, math, re, gzip, argparse, tempfile
 from abc import ABC, abstractmethod
 from functools import lru_cache
-import os, math, re, gzip
+from pathlib import Path
 from tqdm import trange # type: ignore
 from PIL import Image # type: ignore
-import numpy as np
 
 # configs:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
@@ -315,16 +317,9 @@ class DiffusionModel:
       self.diffusion_model = UNetModel(*args, **kwargs)
 
 
-class Embedder(ABC):
-   input_key: str
-   @abstractmethod
-   def __call__(self, x:Tensor) -> Tensor:
-      pass
-
-
-class Closed:
+class Tokenizer:
    """
-   Namespace for OpenAI CLIP model components.
+   Namespace for CLIP Text Tokenizer components.
    """
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L409
@@ -367,11 +362,11 @@ class Closed:
    def default_bpe(): return fetch("https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz", "bpe_simple_vocab_16e6.txt.gz")
    class ClipTokenizer:
       def __init__(self):
-         self.byte_encoder = Closed.bytes_to_unicode()
-         merges = gzip.open(Closed.default_bpe()).read().decode("utf-8").split('\n')
+         self.byte_encoder = Tokenizer.bytes_to_unicode()
+         merges = gzip.open(Tokenizer.default_bpe()).read().decode("utf-8").split('\n')
          merges = merges[1:49152-256-2+1]
          merges = [tuple(merge.split()) for merge in merges]
-         vocab = list(Closed.bytes_to_unicode().values())
+         vocab = list(Tokenizer.bytes_to_unicode().values())
          vocab = vocab + [v+'</w>' for v in vocab]
          for merge in merges:
             vocab.append(''.join(merge))
@@ -385,7 +380,7 @@ class Closed:
          if token in self.cache:
             return self.cache[token]
          word = tuple(token[:-1]) + ( token[-1] + '</w>',)
-         pairs = Closed.get_pairs(word)
+         pairs = Tokenizer.get_pairs(word)
 
          if not pairs:
             return token+'</w>'
@@ -416,14 +411,14 @@ class Closed:
             word = new_word
             if len(word) == 1:
                break
-            pairs = Closed.get_pairs(word)
+            pairs = Tokenizer.get_pairs(word)
          word = ' '.join(word)
          self.cache[token] = word
          return word
 
       def encode(self, text:str, pad_with_zeros:bool=False):
          bpe_tokens = []
-         text = Closed.whitespace_clean(text.strip()).lower()
+         text = Tokenizer.whitespace_clean(text.strip()).lower()
          for token in re.findall(self.pat, text):
             token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
             bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
@@ -432,6 +427,19 @@ class Closed:
             bpe_tokens = bpe_tokens[:75]
          return [49406] + bpe_tokens + [49407] + ([0] if pad_with_zeros else [49407]) * (77 - len(bpe_tokens) - 2)
 
+
+
+class Embedder(ABC):
+   input_key: str
+   @abstractmethod
+   def __call__(self, x:Tensor) -> Tensor:
+      pass
+
+
+class Closed:
+   """
+   Namespace for OpenAI CLIP model components.
+   """
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L329
    class ClipMlp:
@@ -531,9 +539,9 @@ class Closed:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
 class FrozenClosedClipEmbedder(Embedder):
    def __init__(self):
-      self.tokenizer   = Closed.ClipTokenizer()
+      self.tokenizer   = Tokenizer.ClipTokenizer()
       self.transformer = Closed.ClipTextModel()
-      self.input_key = "txt"
+      self.input_key   = "txt"
    
    def __call__(self, text:Tensor) -> Tensor:
       tokens = Tensor(self.tokenizer.encode(text))
@@ -646,7 +654,7 @@ class FrozenOpenClipEmbedder(Embedder):
    def __init__(self, dims:int=1280):
       self.model = Open.ClipTextTransformer(dims)
       self.input_key = "txt"
-      self.tokenizer = Closed.ClipTokenizer()
+      self.tokenizer = Tokenizer.ClipTokenizer()
    
    def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
       for r in self.model.transformer.resblocks:
@@ -918,8 +926,6 @@ def run(model, x, tms, ctx, y, c_out, add):
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
-   scale_factor: float = 0.13025
-
    def __init__(self, config:Dict):
       self.conditioner = Conditioner(**config["conditioner"])
       self.first_stage_model = FirstStageModel(**config["first_stage_model"])
@@ -929,7 +935,7 @@ class SDXL:
       self.sigmas = self.discretization(config["denoiser"]["num_idx"], flip=True).numpy()
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
-   def create_conditioning(self, pos_prompt:str, neg_prompt:str, img_width:int, img_height:int) -> Tuple[Dict,Dict]:
+   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float=5.0) -> Tuple[Dict,Dict]:
       batch_c : Dict = {
          "txt": pos_prompt,
          "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
@@ -938,7 +944,7 @@ class SDXL:
          "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
       }
       batch_uc: Dict = {
-         "txt": neg_prompt,
+         "txt": "",
          "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
          "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
          "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
@@ -964,14 +970,11 @@ class SDXL:
       def prep(*tensors:Tensor):
          return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-      # x, tms, ctx, y, c_out, add = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x)
-      # return self.model(x, tms, ctx, y)*c_out + add
-
       return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
    # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
    def decode(self, x:Tensor) -> Tensor:
-      return self.first_stage_model.decode(1.0 / self.scale_factor * x)
+      return self.first_stage_model.decode(1.0 / 0.13025 * x)
 
 
 class VanillaCFG:
@@ -1044,56 +1047,55 @@ class DPMPP2MSampler:
 
 
 if __name__ == "__main__":
+   parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+   parser.add_argument('--steps',    type=int,   default=5, help="The number of diffusion steps")
+   parser.add_argument('--prompt',   type=str,   default="a horse size cat eating a bagle", help="Description of image to generate")
+   parser.add_argument('--out',      type=str,   default=Path(tempfile.gettempdir()) / "rendered.png", help="Output filename")
+   parser.add_argument('--seed',     type=int,   default=0, help="Set the random latent seed")
+   parser.add_argument('--guidance', type=float, default=6.0, help="Prompt strength")
+   parser.add_argument('--width',    type=int,   default=1024, help="The output image width")
+   parser.add_argument('--height',   type=int,   default=1024, help="The output image height")
+   parser.add_argument('--noshow',   action='store_true', help="Don't show the image")
+   args = parser.parse_args()
+
    Tensor.no_grad = True
-   Tensor.manual_seed(1234)
-
-   weight_path = os.path.join(os.path.dirname(__file__), "..", "weights", "sd_xl_base_1.0.safetensors")
-   state_dict = safe_load(weight_path)
-
-   for k, v in state_dict.items():
-      if k.startswith("model.") or k.startswith("conditioner."):
-         v = v.cast(dtypes.float16)
+   if args.seed:
+      Tensor.manual_seed(args.seed)
 
    model = SDXL(configs["SDXL_Base"])
-   load_state_dict(model, state_dict, strict=True)
-
-   # sampling params
-   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/api.py#L52
-   # pos_prompt = "a horse sized cat eating a bagel"
-   pos_prompt = "an astronaut riding a skateboard on the moon"
-   neg_prompt = ""
-   img_width  = 1024
-   img_height = 1024
-   steps = 5
-   cfg_scale = 6.0
-   eta = 1.0
-   aesthetic_score = 5.0
+   weights = fetch('https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors', 'sd_xl_base_1.0.safetensors')
+   load_state_dict(model, safe_load(weights), strict=True)
 
    N = 1
    C = 4
    F = 8
 
-   c, uc = model.create_conditioning(pos_prompt, neg_prompt, img_width, img_height)
+   assert args.width  % F == 0, f"img_width must be multiple of {F}, got {args.width}"
+   assert args.height % F == 0, f"img_height must be multiple of {F}, got {args.height}"
+
+   c, uc = model.create_conditioning(args.prompt, args.width, args.height)
    del model.conditioner
    for v in c .values(): v.realize()
    for v in uc.values(): v.realize()
-   print("created batches")
+   print("created batch")
 
    # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
-   shape = (N, C, img_height // F, img_width // F)
+   shape = (N, C, args.height // F, args.width // F)
    randn = Tensor.randn(shape)
 
-   sampler = DPMPP2MSampler(cfg_scale)
-   z = sampler(model.denoise, randn, c, uc, steps)
+   sampler = DPMPP2MSampler(args.guidance)
+   z = sampler(model.denoise, randn, c, uc, args.steps)
    print("created samples")
    x = model.decode(z).realize()
    print("decoded samples")
 
    # make image correct size and scale
    x = (x + 1.0) / 2.0
-   x = x.reshape(3,img_height,img_width).permute(1,2,0).clip(0,1)*255
+   x = x.reshape(3,args.height,args.width).permute(1,2,0).clip(0,1)*255
    x = x.cast(dtypes.float32).realize().cast(dtypes.uint8)
    print(x.shape)
 
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
-   im.show()
+   print(f"saving {args.out}")
+   if not args.noshow:
+      im.show()
