@@ -4,6 +4,7 @@
 # mlfoundations/open_clip        | MIT     | https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/LICENSE
 
 from tinygrad import Tensor, dtypes # type: ignore
+from typing import Tuple
 import numpy as np
 import math
 

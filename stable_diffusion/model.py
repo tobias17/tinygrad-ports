@@ -2,7 +2,7 @@ import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from tinygrad import Tensor, TinyJit, dtypes # type: ignore
-from tinygrad.helpers import fetch # type: ignore
+from tinygrad.helpers import fetch, Context, getenv # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict, torch_load # type: ignore
 
 from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
@@ -55,6 +55,9 @@ class Conditioner:
 
     return output
 
+def prep_for_jit(*tensors:Tensor) -> Tuple[Tensor,...]:
+  return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
 class StableDiffusion(ABC):
   @abstractmethod
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
@@ -69,25 +72,39 @@ class StableDiffusion(ABC):
   def delete_conditioner(self) -> None:
     pass
 
-class StableDiffusion_1x(StableDiffusion):
+class StableDiffusion1x(StableDiffusion):
   def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
     self.cond_stage_model = Conditioner(**conditioner)
     self.first_stage_model = FirstStageModel(**first_stage_model)
     self.model = DiffusionModel(**model)
 
-    self.alphas_cumprod = Tensor(get_alphas_cumprod())
+    disc = LegacyDDPMDiscretization()
+    self.sigmas = disc(num_timesteps, flip=True)
+    self.alphas_cumprod = disc.alphas_cumprod
 
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
-    pass
+    return self.cond_stage_model({"txt":pos_prompt}), self.cond_stage_model({"txt":""})
 
   def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
-    pass
+
+    def sigma_to_idx(s:Tensor) -> Tensor:
+      dists = s - self.sigmas.unsqueeze(1)
+      return dists.abs().argmin(axis=0).view(*s.shape)
+
+    sigma = self.sigmas[sigma_to_idx(sigma)]
+    c_noise = sigma_to_idx(sigma)
+
+    # @TinyJit
+    def run(x, tms, ctx):
+      return self.model.diffusion_model(x, tms, ctx, None).realize()
+
+    return run(*prep_for_jit(x, c_noise, cond["crossattn"]))
 
   def decode(self, x:Tensor) -> Tensor:
     pass
 
   def delete_conditioner(self) -> None:
-    pass
+    del self.cond_stage_model
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
@@ -132,14 +149,11 @@ class SDXL(StableDiffusion):
     c_in    = 1 / (sigma**2 + 1.0) ** 0.5
     c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
-    def prep(*tensors:Tensor):
-      return tuple(t.cast(dtypes.float16).realize() for t in tensors)
-
     @TinyJit
-    def run(model, x, tms, ctx, y, c_out, add):
-      return (model(x, tms, ctx, y)*c_out + add).realize()
+    def run(x, tms, ctx, y, c_out, add):
+      return (self.model.diffusion_model(x, tms, ctx, y)*c_out + add).realize()
 
-    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
+    return run(*prep_for_jit(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
   def decode(self, x:Tensor) -> Tensor:
@@ -150,9 +164,9 @@ class SDXL(StableDiffusion):
 
 configs: Dict = {
   # https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/configs/stable-diffusion/v1-inference.yaml
-  "SD_1x": {
+  "SD1x": {
     "default_weights_url": "https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt",
-    "class": StableDiffusion_1x,
+    "class": StableDiffusion1x,
     "args": {
       "model": {
         "adm_in_ch": None,
@@ -185,7 +199,7 @@ configs: Dict = {
   },
   
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
-  "SDXL_Base": {
+  "SDXL": {
     "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
     "class": SDXL,
     "args": {
@@ -295,7 +309,7 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('--arch',        type=str,   default="SD_1x", choices=list(configs.keys()), help="What architecture to use")
+  parser.add_argument('--arch',        type=str,   default="SD1x", choices=list(configs.keys()), help="What architecture to use")
   parser.add_argument('--steps',       type=int,   default=5, help="The number of diffusion steps")
   parser.add_argument('--prompt',      type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
   parser.add_argument('--out',         type=str,   default=Path(tempfile.gettempdir())/"rendered.png", help="Output filename")
@@ -334,7 +348,8 @@ if __name__ == "__main__":
   randn = Tensor.randn(shape)
 
   sampler = DPMPP2MSampler(args.guidance)
-  z = sampler(model.denoise, randn, c, uc, args.steps)
+  with Context(BEAM=getenv("LATEBEAM")):
+    z = sampler(model.denoise, randn, c, uc, args.steps)
   print("created samples")
   x = model.decode(z).realize()
   print("decoded samples")

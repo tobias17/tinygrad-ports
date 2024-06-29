@@ -222,12 +222,13 @@ class UNetModel:
       Conv2d(model_ch, out_ch, 3, padding=1),
     ]
 
-  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
+  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Optional[Tensor]) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch).cast(dtypes.float16)
     emb   = t_emb.sequential(self.time_embed)
 
-    assert y.shape[0] == x.shape[0]
-    emb = emb + y.sequential(self.label_emb[0])
+    if y is not None:
+      assert y.shape[0] == x.shape[0]
+      emb = emb + y.sequential(self.label_emb[0])
 
     emb = emb.cast(dtypes.float16)
     ctx = ctx.cast(dtypes.float16)
