@@ -1,24 +1,67 @@
-from tinygrad import Tensor # type: ignore
+from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.helpers import trange # type: ignore
-from stable_diffusion import append_dims, LegacyDDPMDiscretization # type: ignore
+from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
 
 from typing import Dict, Tuple, Optional
+from abc import ABC, abstractmethod
 
 class VanillaCFG:
   def __init__(self, scale:float):
     self.scale = scale
 
-  def prepare_inputs(self, x:Tensor, s:float, c:Dict, uc:Dict) -> Tuple[Tensor,Tensor,Tensor]:
+  def prepare_inputs(self, x:Tensor, s:Optional[Tensor], c:Dict, uc:Dict) -> Tuple[Tensor,Tensor,Tensor]:
     c_out = {}
     for k in c:
       assert k in ["vector", "crossattn", "concat"]
       c_out[k] = Tensor.cat(uc[k], c[k], dim=0)
-    return Tensor.cat(x, x), Tensor.cat(s, s), c_out
+    return Tensor.cat(x, x), None if s is None else Tensor.cat(s, s), c_out
 
   def __call__(self, x:Tensor, sigma:float) -> Tensor:
     x_u, x_c = x.chunk(2)
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
+
+class Sampler(ABC):
+  @abstractmethod
+  def __init__(self, cfg_scale:float):
+    pass
+  @abstractmethod
+  def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
+    pass
+
+class SD1xSampler:
+  def __init__(self, cfg_scale:float):
+    self.discretization = LegacyDDPMDiscretization()
+    self.cfg_scale = cfg_scale
+    self.guider = VanillaCFG(cfg_scale)
+    self.alphas_cumprod = get_alphas_cumprod()
+
+  def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
+    timesteps   = list(range(1, 1000, 1000//num_steps))
+    alphas      = Tensor(self.alphas_cumprod[timesteps])
+    alphas_prev = Tensor([1.0]).cat(alphas[:-1])
+    print(f"timesteps   : {timesteps}")
+    print(f"alphas      : {alphas.numpy()}")
+    print(f"alphas_prev : {alphas_prev.numpy()}")
+
+    for index, timestep in list(enumerate(timesteps))[::-1]:
+      tid        = Tensor([index])
+      alpha      = alphas     [tid]
+      alpha_prev = alphas_prev[tid]
+      print(f"tid: {tid.numpy()}")
+
+      latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
+      latents = denoiser(latents, Tensor([timestep]), cond)
+      uc_latent, c_latent = map(lambda l: l.squeeze(0), latents.reshape(2,*x.shape).chunk(2))
+      e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
+
+      sqrt_one_minus_at = (1 - alpha).sqrt()
+      pred_x0 = (x - sqrt_one_minus_at * e_t)
+      dir_xt = (1. - alpha_prev).sqrt() * e_t
+      x = alpha_prev.sqrt() * pred_x0 + dir_xt
+
+    return x
+
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287

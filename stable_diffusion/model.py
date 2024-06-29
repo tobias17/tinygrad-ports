@@ -9,7 +9,7 @@ from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscreti
 from stable_diffusion.embedders import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, ConcatTimestepEmbedderND
 from stable_diffusion.first_stage import FirstStageModel # type: ignore
 from stable_diffusion.unet import DiffusionModel
-from stable_diffusion.samplers import DPMPP2MSampler
+from stable_diffusion.samplers import DPMPP2MSampler, SD1xSampler
 
 from typing import Dict, Tuple, List, Set, Optional
 from abc import ABC, abstractmethod
@@ -19,7 +19,7 @@ from PIL import Image
 import numpy as np
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L71
-class Conditioner:
+class GeneralConditioner:
   OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat", 5: "concat"}
   KEY2CATDIM      = {"vector": 1, "crossattn": 2, "concat": 1}
   embedders: List[Embedder]
@@ -63,7 +63,7 @@ class StableDiffusion(ABC):
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
     pass
   @abstractmethod
-  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+  def denoise(self, x:Tensor, sigmas_or_tms:Tensor, cond:Dict) -> Tensor:
     pass
   @abstractmethod
   def decode(self, x:Tensor) -> Tensor:
@@ -73,8 +73,8 @@ class StableDiffusion(ABC):
     pass
 
 class StableDiffusion1x(StableDiffusion):
-  def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
-    self.cond_stage_model = Conditioner(**conditioner)
+  def __init__(self, first_stage_model:Dict, model:Dict, num_timesteps:int):
+    self.cond_stage_model = FrozenClosedClipEmbedder()
     self.first_stage_model = FirstStageModel(**first_stage_model)
     self.model = DiffusionModel(**model)
 
@@ -83,22 +83,14 @@ class StableDiffusion1x(StableDiffusion):
     self.alphas_cumprod = disc.alphas_cumprod
 
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
-    return self.cond_stage_model({"txt":pos_prompt}), self.cond_stage_model({"txt":""})
+    return {"crossattn": self.cond_stage_model(pos_prompt)}, {"crossattn": self.cond_stage_model("")}
 
-  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
-
-    def sigma_to_idx(s:Tensor) -> Tensor:
-      dists = s - self.sigmas.unsqueeze(1)
-      return dists.abs().argmin(axis=0).view(*s.shape)
-
-    sigma = self.sigmas[sigma_to_idx(sigma)]
-    c_noise = sigma_to_idx(sigma)
-
+  def denoise(self, x:Tensor, tms:Tensor, cond:Dict) -> Tensor:
     # @TinyJit
     def run(x, tms, ctx):
       return self.model.diffusion_model(x, tms, ctx, None).realize()
 
-    return run(*prep_for_jit(x, c_noise, cond["crossattn"]))
+    return run(*prep_for_jit(x, tms, cond["crossattn"]))
 
   def decode(self, x:Tensor) -> Tensor:
     return self.first_stage_model.decode(1.0 / 0.13025 * x)
@@ -109,7 +101,7 @@ class StableDiffusion1x(StableDiffusion):
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
   def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
-    self.conditioner = Conditioner(**conditioner)
+    self.conditioner = GeneralConditioner(**conditioner)
     self.first_stage_model = FirstStageModel(**first_stage_model)
     self.model = DiffusionModel(**model)
 
@@ -179,11 +171,6 @@ configs: Dict = {
         "n_heads": 8,
         "transformer_depth": [1, 1, 1, 1],
         "ctx_dim": 768,
-      },
-      "conditioner": {
-        "embedders": [
-          { "class": FrozenClosedClipEmbedder, "args": {} },
-        ],
       },
       "first_stage_model": {
         "ch": 128,
@@ -347,7 +334,7 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = DPMPP2MSampler(args.guidance)
+  sampler = SD1xSampler(args.guidance)
   with Context(BEAM=getenv("LATEBEAM")):
     z = sampler(model.denoise, randn, c, uc, args.steps)
   print("created samples")
