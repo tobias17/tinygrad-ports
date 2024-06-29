@@ -295,15 +295,24 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   return model
 
 if __name__ == "__main__":
+  arch_parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+  arch_parser.add_argument('--arch', type=str, default="SD1x", choices=list(configs.keys()), help="What architecture to use")
+  arch_args, _ = arch_parser.parse_known_args()
+  defaults = {
+    "SD1x":         { "width": 512,  "height": 512  },
+    "SDXL":         { "width": 1024, "height": 1024 },
+    "SDXL_Refiner": { "width": 1024, "height": 1024 },
+  }[arch_args.arch]
+
   parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument('--arch',        type=str,   default="SD1x", choices=list(configs.keys()), help="What architecture to use")
-  parser.add_argument('--steps',       type=int,   default=5, help="The number of diffusion steps")
+  parser.add_argument('--steps',       type=int,   default=10, help="The number of diffusion steps")
   parser.add_argument('--prompt',      type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
   parser.add_argument('--out',         type=str,   default=Path(tempfile.gettempdir())/"rendered.png", help="Output filename")
   parser.add_argument('--seed',        type=int,   help="Set the random latent seed")
   parser.add_argument('--guidance',    type=float, default=6.0, help="Prompt strength")
-  parser.add_argument('--width',       type=int,   default=1024, help="The output image width")
-  parser.add_argument('--height',      type=int,   default=1024, help="The output image height")
+  parser.add_argument('--width',       type=int,   default=defaults["width"],  help="The output image width")
+  parser.add_argument('--height',      type=int,   default=defaults["height"], help="The output image height")
   parser.add_argument('--aesthetic',   type=float, default=5.0, help="Aesthetic store for conditioning, only for SDXL_Refiner")
   parser.add_argument('--weights-fn',  type=str,   help="Filename of weights to load")
   parser.add_argument('--weights-url', type=str,   help="Url to download weights from")
@@ -334,9 +343,10 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = SD1xSampler(args.guidance)
-  with Context(BEAM=getenv("LATEBEAM")):
-    z = sampler(model.denoise, randn, c, uc, args.steps)
+  # sampler = SD1xSampler(args.guidance)
+  # with Context(BEAM=getenv("LATEBEAM")):
+  #   z = sampler(model.denoise, randn, c, uc, args.steps)
+  z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/latent_out.npy"))
   print("created samples")
   x = model.decode(z).realize()
   print("decoded samples")
