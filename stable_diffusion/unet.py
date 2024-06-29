@@ -223,6 +223,12 @@ class UNetModel:
     ]
 
   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Optional[Tensor]) -> Tensor:
+    import numpy as np
+    root = "/home/tobi/repos/tinygrad-ports/weights/sd1x/model_inputs_last"
+    x = Tensor(np.load(f"{root}/x.npy"))
+    tms = Tensor(np.load(f"{root}/timesteps.npy"))
+    ctx = Tensor(np.load(f"{root}/context.npy"))
+
     t_emb = timestep_embedding(tms, self.model_ch).cast(dtypes.float16)
     emb   = t_emb.sequential(self.time_embed)
 

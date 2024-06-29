@@ -40,9 +40,6 @@ class SD1xSampler:
     timesteps   = list(range(1, 1000, 1000//num_steps))
     alphas      = Tensor(self.alphas_cumprod[timesteps])
     alphas_prev = Tensor([1.0]).cat(alphas[:-1])
-    print(f"timesteps   : {timesteps}")
-    print(f"alphas      : {alphas.numpy()}")
-    print(f"alphas_prev : {alphas_prev.numpy()}")
 
     for index, timestep in list(enumerate(timesteps))[::-1]:
       tid        = Tensor([index])
