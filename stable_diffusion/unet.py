@@ -2,8 +2,7 @@ from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
 from stable_diffusion import tensor_identity, timestep_embedding
 
-from typing import Optional, Union, List, Any
-import math
+from typing import Optional, Union, List, Any, Tuple
 
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L136
 class ResBlock:
@@ -135,49 +134,51 @@ class Upsample:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/openaimodel.py#L472
 # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L257
 class UNetModel:
-  def __init__(self, adm_in_channels:int, in_channels:int, out_channels:int, model_channels:int, attention_resolutions:List[int], num_res_blocks:int, channel_mult:List[int], d_head:int, transformer_depth:List[int], ctx_dim:Union[int,List[int]]):
-    self.in_channels = in_channels
-    self.model_channels = model_channels
-    self.out_channels = out_channels
+  def __init__(self, adm_in_ch:Optional[int], in_ch:int, out_ch:int, model_ch:int, attention_resolutions:List[int], num_res_blocks:int, channel_mult:List[int], transformer_depth:List[int], ctx_dim:Union[int,List[int]], d_head:Optional[int]=None, n_heads:Optional[int]=None):
+    self.model_ch = model_ch
     self.num_res_blocks = [num_res_blocks] * len(channel_mult)
 
     self.attention_resolutions = attention_resolutions
-    self.dropout = 0.0
-    self.channel_mult = channel_mult
-    self.conv_resample = True
-    self.num_classes = "sequential"
-    self.use_checkpoint = False
-    self.d_head = d_head
+    self.d_head  = d_head
+    self.n_heads = n_heads
+    def get_d_and_n_heads(dims:int) -> Tuple[int,int]:
+      if self.d_head is None:
+        assert self.n_heads is not None, f"d_head and n_heads cannot both be None"
+        return dims // self.n_heads, self.n_heads
+      else:
+        assert self.n_heads is None, f"d_head and n_heads cannot both be non-None"
+        return self.d_head, dims // self.d_head
 
-    time_embed_dim = model_channels * 4
+    time_embed_dim = model_ch * 4
     self.time_embed = [
-      Linear(model_channels, time_embed_dim),
+      Linear(model_ch, time_embed_dim),
       Tensor.silu,
       Linear(time_embed_dim, time_embed_dim),
     ]
 
-    self.label_emb = [
-      [
-        Linear(adm_in_channels, time_embed_dim),
-        Tensor.silu,
-        Linear(time_embed_dim, time_embed_dim),
+    if adm_in_ch is not None:
+      self.label_emb = [
+        [
+          Linear(adm_in_ch, time_embed_dim),
+          Tensor.silu,
+          Linear(time_embed_dim, time_embed_dim),
+        ]
       ]
-    ]
 
     self.input_blocks = [
-      [Conv2d(in_channels, model_channels, 3, padding=1)]
+      [Conv2d(in_ch, model_ch, 3, padding=1)]
     ]
-    input_block_channels = [model_channels]
-    ch = model_channels
+    input_block_channels = [model_ch]
+    ch = model_ch
     ds = 1
     for idx, mult in enumerate(channel_mult):
       for _ in range(self.num_res_blocks[idx]):
         layers: List[Any] = [
-          ResBlock(ch, time_embed_dim, model_channels*mult),
+          ResBlock(ch, time_embed_dim, model_ch*mult),
         ]
-        ch = mult * model_channels
+        ch = mult * model_ch
         if ds in attention_resolutions:
-          n_heads = ch // d_head
+          d_head, n_heads = get_d_and_n_heads(ch)
           layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
 
         self.input_blocks.append(layers)
@@ -190,7 +191,7 @@ class UNetModel:
         input_block_channels.append(ch)
         ds *= 2
 
-    n_heads = ch // d_head
+    d_head, n_heads = get_d_and_n_heads(ch)
     self.middle_block: List = [
       ResBlock(ch, time_embed_dim, ch),
       SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[-1]),
@@ -202,12 +203,12 @@ class UNetModel:
       for i in range(self.num_res_blocks[idx] + 1):
         ich = input_block_channels.pop()
         layers = [
-          ResBlock(ch + ich, time_embed_dim, model_channels*mult),
+          ResBlock(ch + ich, time_embed_dim, model_ch*mult),
         ]
-        ch = model_channels * mult
+        ch = model_ch * mult
 
         if ds in attention_resolutions:
-          n_heads = ch // d_head
+          d_head, n_heads = get_d_and_n_heads(ch)
           layers.append(SpatialTransformer(ch, n_heads, d_head, ctx_dim, depth=transformer_depth[idx]))
 
         if idx > 0 and i == self.num_res_blocks[idx]:
@@ -218,11 +219,11 @@ class UNetModel:
     self.out = [
       GroupNorm(32, ch),
       Tensor.silu,
-      Conv2d(model_channels, out_channels, 3, padding=1),
+      Conv2d(model_ch, out_ch, 3, padding=1),
     ]
 
   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Tensor) -> Tensor:
-    t_emb = timestep_embedding(tms, self.model_channels).cast(dtypes.float16)
+    t_emb = timestep_embedding(tms, self.model_ch).cast(dtypes.float16)
     emb   = t_emb.sequential(self.time_embed)
 
     assert y.shape[0] == x.shape[0]

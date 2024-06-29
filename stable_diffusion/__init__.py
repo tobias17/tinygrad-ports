@@ -22,13 +22,17 @@ def append_dims(x:Tensor, t:Tensor) -> Tensor:
   assert dims_to_append >= 0
   return x.reshape(x.shape + (1,)*dims_to_append)
 
+def get_alphas_cumprod(beta_start=0.00085, beta_end=0.0120, n_training_steps=1000):
+  betas = np.linspace(beta_start ** 0.5, beta_end ** 0.5, n_training_steps, dtype=np.float32) ** 2
+  alphas = 1.0 - betas
+  alphas_cumprod = np.cumprod(alphas, axis=0)
+  return alphas_cumprod
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/discretizer.py#L42
 class LegacyDDPMDiscretization:
   def __init__(self, linear_start:float=0.00085, linear_end:float=0.0120, num_timesteps:int=1000):
     self.num_timesteps = num_timesteps
-    betas = np.linspace(linear_start**0.5, linear_end**0.5, num_timesteps, dtype=np.float32) ** 2
-    alphas = 1.0 - betas
-    self.alphas_cumprod = np.cumprod(alphas, axis=0)
+    self.alphas_cumprod = get_alphas_cumprod(linear_start, linear_end, num_timesteps)
 
   def __call__(self, n:int, flip:bool=False) -> Tensor:
     if n < self.num_timesteps:

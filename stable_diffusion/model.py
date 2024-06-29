@@ -1,8 +1,8 @@
 from tinygrad import Tensor, TinyJit, dtypes # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict, torch_load # type: ignore
 
-from stable_diffusion import append_dims, LegacyDDPMDiscretization # type: ignore
+from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
 from stable_diffusion.embedders import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, ConcatTimestepEmbedderND
 from stable_diffusion.first_stage import FirstStageModel # type: ignore
 from stable_diffusion.unet import DiffusionModel
@@ -66,14 +66,34 @@ class StableDiffusion(ABC):
   def delete_conditioner(self) -> None:
     pass
 
+class StableDiffusion_1x(StableDiffusion):
+  def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
+    self.cond_stage_model = Conditioner(**conditioner)
+    self.first_stage_model = FirstStageModel(**first_stage_model)
+    self.model = DiffusionModel(**model)
+
+    self.alphas_cumprod = Tensor(get_alphas_cumprod())
+
+  def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
+    pass
+
+  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+    pass
+
+  def decode(self, x:Tensor) -> Tensor:
+    pass
+
+  def delete_conditioner(self) -> None:
+    pass
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
-  def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, **kwargs):
+  def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
     self.conditioner = Conditioner(**conditioner)
     self.first_stage_model = FirstStageModel(**first_stage_model)
     self.model = DiffusionModel(**model)
 
-    self.sigmas = LegacyDDPMDiscretization()(kwargs["denoiser"]["num_idx"], flip=True)
+    self.sigmas = LegacyDDPMDiscretization()(num_timesteps, flip=True)
 
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
@@ -126,18 +146,51 @@ class SDXL(StableDiffusion):
     del self.conditioner
 
 configs: Dict = {
-  "StableDiffusion_1x": {
-    "class": ""
+  # https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/configs/stable-diffusion/v1-inference.yaml
+  "SD_1x": {
+    "default_weights_url": "https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt",
+    "class": StableDiffusion_1x,
+    "args": {
+      "model": {
+        "adm_in_ch": None,
+        "in_ch": 4,
+        "out_ch": 4,
+        "model_ch": 320,
+        "attention_resolutions": [4, 2, 1],
+        "num_res_blocks": 2,
+        "channel_mult": [1, 2, 4, 4],
+        "n_heads": 8,
+        "transformer_depth": [1, 1, 1, 1],
+        "ctx_dim": 768,
+      },
+      "conditioner": {
+        "embedders": [
+          { "class": FrozenClosedClipEmbedder, "args": {} },
+        ],
+      },
+      "first_stage_model": {
+        "ch": 128,
+        "in_ch": 3,
+        "out_ch": 3,
+        "z_ch": 4,
+        "ch_mult": [1, 2, 4, 4],
+        "num_res_blocks": 2,
+        "resolution": 256,
+      },
+      "num_timesteps": 1000,
+    },
   },
+  
+  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
   "SDXL_Base": {
     "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
     "class": SDXL,
     "args": {
       "model": {
-        "adm_in_channels": 2816,
-        "in_channels": 4,
-        "out_channels": 4,
-        "model_channels": 320,
+        "adm_in_ch": 2816,
+        "in_ch": 4,
+        "out_ch": 4,
+        "model_ch": 320,
         "attention_resolutions": [4, 2],
         "num_res_blocks": 2,
         "channel_mult": [1, 2, 4],
@@ -163,19 +216,19 @@ configs: Dict = {
         "num_res_blocks": 2,
         "resolution": 256,
       },
-      "denoiser": {
-        "num_idx": 1000
-      },
+      "num_timesteps": 1000,
     },
   },
+
+  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_refiner.yaml
   "SDXL_Refiner": {
     "class": SDXL,
     "args": {
       "model": {
-        "adm_in_channels": 2560,
-        "in_channels": 4,
-        "out_channels": 4,
-        "model_channels": 384,
+        "adm_in_ch": 2560,
+        "in_ch": 4,
+        "out_ch": 4,
+        "model_ch": 384,
         "attention_resolutions": [4, 2],
         "num_res_blocks": 2,
         "channel_mult": [1, 2, 4, 4],
@@ -204,25 +257,35 @@ configs: Dict = {
       "denoiser": {
         "num_idx": 1000,
       },
+      "num_timesteps": 1000,
     }
   }
 }
 
 def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:Optional[str]=None) -> StableDiffusion:
+  config = configs.get(config_key, None)
+  assert config is not None, f"Invalid architecture key '{args.arch}', expected value in {list(configs.keys())}"
+  model = config["class"](**config["args"])
+
   if weights_fn is not None:
     assert weights_url is None, "Got passed both a weights_fn and weights_url, options are mutually exclusive"
   else:
     weights_url = weights_url if weights_url is not None else config["default_weights_url"]
     weights_fn  = fetch(weights_url, os.path.basename(weights_url))
 
-  model: StableDiffusion = config["class"](**config["args"])
-  load_state_dict(model, safe_load(weights_fn), strict=False)
+  loader_map = {
+    "ckpt": lambda fn: torch_load(fn)["state_dict"],
+    "safetensors": safe_load,
+  }
+  loader = loader_map.get(ext := weights_fn.split(".")[-1], None)
+  assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
+  load_state_dict(model, loader(weights_fn), strict=False)
 
   return model
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('--arch',        type=str,   default="SDXL_Base", choices=list(configs.keys()), help="What architecture to use")
+  parser.add_argument('--arch',        type=str,   default="SD_1x", choices=list(configs.keys()), help="What architecture to use")
   parser.add_argument('--steps',       type=int,   default=5, help="The number of diffusion steps")
   parser.add_argument('--prompt',      type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
   parser.add_argument('--out',         type=str,   default=Path(tempfile.gettempdir())/"rendered.png", help="Output filename")
@@ -233,6 +296,7 @@ if __name__ == "__main__":
   parser.add_argument('--aesthetic',   type=float, default=5.0, help="Aesthetic store for conditioning, only for SDXL_Refiner")
   parser.add_argument('--weights-fn',  type=str,   help="Filename of weights to load")
   parser.add_argument('--weights-url', type=str,   help="Url to download weights from")
+  parser.add_argument('--fp16',        action='store_true', help="Loads the weights as float16")
   parser.add_argument('--noshow',      action='store_true', help="Don't show the image")
   args = parser.parse_args()
 
@@ -240,9 +304,7 @@ if __name__ == "__main__":
   if args.seed is not None:
     Tensor.manual_seed(args.seed)
   
-  config = configs.get(args.arch, None)
-  assert config is not None, f"Somehow got passed invalid architecture '{args.arch}', expected value in {list(configs.keys())}"
-  model = from_pretrained(config, args.weights_fn, args.weights_url)
+  model = from_pretrained(args.arch, args.weights_fn, args.weights_url)
 
   N = 1
   C = 4
