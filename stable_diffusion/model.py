@@ -101,7 +101,7 @@ class StableDiffusion1x(StableDiffusion):
     return run(*prep_for_jit(x, c_noise, cond["crossattn"]))
 
   def decode(self, x:Tensor) -> Tensor:
-    pass
+    return self.first_stage_model.decode(1.0 / 0.13025 * x)
 
   def delete_conditioner(self) -> None:
     del self.cond_stage_model
