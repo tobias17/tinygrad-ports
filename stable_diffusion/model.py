@@ -1,3 +1,6 @@
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
 from tinygrad import Tensor, TinyJit, dtypes # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict, torch_load # type: ignore
@@ -10,7 +13,7 @@ from stable_diffusion.samplers import DPMPP2MSampler
 
 from typing import Dict, Tuple, List, Set, Optional
 from abc import ABC, abstractmethod
-import os, argparse, tempfile
+import os, argparse, tempfile, re
 from pathlib import Path
 from PIL import Image
 import numpy as np
@@ -262,7 +265,7 @@ configs: Dict = {
   }
 }
 
-def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:Optional[str]=None) -> StableDiffusion:
+def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:Optional[str]=None, fp16:bool=False) -> StableDiffusion:
   config = configs.get(config_key, None)
   assert config is not None, f"Invalid architecture key '{args.arch}', expected value in {list(configs.keys())}"
   model = config["class"](**config["args"])
@@ -277,9 +280,16 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
     "ckpt": lambda fn: torch_load(fn)["state_dict"],
     "safetensors": safe_load,
   }
-  loader = loader_map.get(ext := weights_fn.split(".")[-1], None)
+  loader = loader_map.get(ext := str(weights_fn).split(".")[-1], None)
   assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
-  load_state_dict(model, loader(weights_fn), strict=False)
+  state_dict = loader(weights_fn)
+
+  for k,v in state_dict.items():
+    if fp16:
+      state_dict[k] = v.cast(dtypes.float16)
+    if re.match(r'model\.diffusion_model\..+_block.+proj_[a-z]+\.weight', k):
+      state_dict[k] = v.squeeze()
+  load_state_dict(model, state_dict, strict=False)
 
   return model
 
@@ -303,8 +313,8 @@ if __name__ == "__main__":
   Tensor.no_grad = True
   if args.seed is not None:
     Tensor.manual_seed(args.seed)
-  
-  model = from_pretrained(args.arch, args.weights_fn, args.weights_url)
+
+  model = from_pretrained(args.arch, args.weights_fn, args.weights_url, args.fp16)
 
   N = 1
   C = 4
