@@ -223,15 +223,15 @@ class Closed:
       return self.final_layer_norm(x) if (self.ret_layer_idx is None) else x
   
   class ClipTextModel:
-    def __init__(self):
-      self.text_model = Closed.ClipTextTransformer(ret_layer_idx=11)
+    def __init__(self, ret_layer_idx:Optional[int]):
+      self.text_model = Closed.ClipTextTransformer(ret_layer_idx=ret_layer_idx)
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L331
 class FrozenClosedClipEmbedder(Embedder):
-  def __init__(self):
+  def __init__(self, ret_layer_idx:Optional[int]=None):
     self.tokenizer   = Tokenizer.ClipTokenizer()
-    self.transformer = Closed.ClipTextModel()
+    self.transformer = Closed.ClipTextModel(ret_layer_idx)
     self.input_key   = "txt"
   
   def __call__(self, text:Tensor) -> Tensor:

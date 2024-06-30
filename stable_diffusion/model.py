@@ -207,7 +207,7 @@ configs: Dict = {
       },
       "conditioner": {
         "embedders": [
-          { "class": FrozenClosedClipEmbedder, "args": {} },
+          { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
           { "class": FrozenOpenClipEmbedder,   "args": {} },
           { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
           { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
@@ -245,7 +245,7 @@ configs: Dict = {
       },
       "conditioner": {
         "embedders": [
-          { "class": FrozenClosedClipEmbedder, "args": {} },
+          { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
           { "class": FrozenOpenClipEmbedder,   "args": {} },
           { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
           { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
