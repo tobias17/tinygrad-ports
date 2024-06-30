@@ -68,10 +68,10 @@ class SD1xSampler:
       # if index == 5:
       #   x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/x_input_5.npy"))
 
-      x = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/x_in_idx{index}.npy"))
+      # x = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/x_in_idx{index}.npy"))
 
       latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
-      latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_idx{index}.npy"))
+      # latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_idx{index}.npy"))
       # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_last.npy"))
       latents = denoiser(latents, Tensor([timestep]), cond, index)
       # latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_idx{index}.npy"))
@@ -80,19 +80,27 @@ class SD1xSampler:
       e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
       # e_t = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_last.npy"))
 
-      injc_e_t = np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_idx{index}.npy")
-      a,b = e_t.numpy(), injc_e_t
+      # a,b = e_t.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_idx{index}.npy")
       # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
       sigma_t = 0
       sqrt_one_minus_at = (1 - alpha).sqrt()
       # print(f"alpha={alpha.numpy().item():.4f}, alpha_prev={alpha_prev.numpy().item():.4f}, sigma_t={sigma_t:.4f}, sqrt_one_minus_at={sqrt_one_minus_at.numpy().item():.4f}")
-      pred_x0 = (x - sqrt_one_minus_at * e_t)
+      pred_x0 = (x - sqrt_one_minus_at * e_t) / alpha.sqrt()
+
+      # a,b = pred_x0.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/pred_x0_idx{index}.npy")
+      # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
       dir_xt = (1. - alpha_prev - sigma_t**2).sqrt() * e_t
+
+      # a,b = dir_xt.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/dir_xt_idx{index}.npy")
+      # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
       new_x = alpha_prev.sqrt() * pred_x0 + dir_xt
 
-      a, b = x.numpy(), new_x.numpy()
-      # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      a,b = new_x.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/x_prev_idx{index}.npy")
+      print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
       x = new_x
 
     return x

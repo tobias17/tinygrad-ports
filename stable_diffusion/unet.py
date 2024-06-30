@@ -260,8 +260,8 @@ class UNetModel:
 
     x = x.sequential(self.out)
 
-    a,b = x.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_x_out_idx{index}.npy")
-    print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    # a,b = x.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_x_out_idx{index}.npy")
+    # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
   
     return x
 
