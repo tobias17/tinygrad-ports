@@ -38,6 +38,13 @@ class SD1xSampler:
 
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
     import numpy as np
+    injc_c  = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/c_in.npy"))
+    injc_uc = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/uc_in.npy"))
+    print("ID | Mean   | Orig   | Inject |")
+    for orig, injc, name in [(c["crossattn"], injc_c, "c "), (uc["crossattn"], injc_uc, "uc")]:
+      orig_n = orig.numpy()
+      injc_n = injc.numpy()
+      print(f"{name} | {np.mean(np.abs(orig_n - injc_n)):.4f} | {np.mean(np.abs(orig_n)):.4f} | {np.mean(np.abs(injc_n)):.4f} |")
 
     timesteps   = list(range(1, 1000, 1000//num_steps))
     alphas      = Tensor(self.alphas_cumprod[timesteps])
@@ -52,9 +59,10 @@ class SD1xSampler:
       # alpha_prev = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/alpha_prev_last.npy"))
       x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/x_last_input.npy"))
 
-      # latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
-      # latents = denoiser(latents, Tensor([timestep]), cond)
-      latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_last.npy"))
+      latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
+      latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_last.npy"))
+      latents = denoiser(latents, Tensor([timestep]), cond)
+      # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_last.npy"))
       uc_latent, c_latent = latents[0:1], latents[1:2]
       e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
       # e_t = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_last.npy"))
