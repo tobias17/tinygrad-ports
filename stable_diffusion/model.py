@@ -89,10 +89,10 @@ class StableDiffusion1x(StableDiffusion):
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
     return {"crossattn": self.cond_stage_model(pos_prompt)}, {"crossattn": self.cond_stage_model("")}
 
-  def denoise(self, x:Tensor, tms:Tensor, cond:Dict, index) -> Tensor:
-    # @TinyJit
+  def denoise(self, x:Tensor, tms:Tensor, cond:Dict) -> Tensor:
+    @TinyJit
     def run(x, tms, ctx):
-      return self.model.diffusion_model(x, tms, ctx, None, index).realize()
+      return self.model.diffusion_model(x, tms, ctx, None).realize()
 
     return run(*prep_for_jit(x, tms, cond["crossattn"]))
 

@@ -222,13 +222,7 @@ class UNetModel:
       Conv2d(model_ch, out_ch, 3, padding=1),
     ]
 
-  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Optional[Tensor], index=999) -> Tensor:
-    import numpy as np
-    root = "/home/tobi/repos/tinygrad-ports/weights/sd1x/model_inputs_last"
-    # x = Tensor(np.load(f"{root}/x.npy"))
-    # tms = Tensor(np.load(f"{root}/timesteps.npy"))
-    # ctx = Tensor(np.load(f"{root}/context.npy"))
-
+  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Optional[Tensor]) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch).cast(dtypes.float16)
     emb   = t_emb.sequential(self.time_embed)
 
@@ -258,12 +252,7 @@ class UNetModel:
       for bb in b:
         x = run(x, bb)
 
-    x = x.sequential(self.out)
-
-    # a,b = x.numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_x_out_idx{index}.npy")
-    # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-  
-    return x
+    return x.sequential(self.out)
 
 
 class DiffusionModel:
