@@ -29,6 +29,8 @@ class Sampler(ABC):
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
     pass
 
+curr_index = 999
+
 class SD1xSampler:
   def __init__(self, cfg_scale:float):
     self.discretization = LegacyDDPMDiscretization()
@@ -53,6 +55,9 @@ class SD1xSampler:
     # print("| i | Mean   | Before | After  |")
 
     for index, timestep in list(enumerate(timesteps))[::-1]:
+      global curr_index
+      curr_index = index
+      
       tid        = Tensor([index])
       alpha      = alphas     [tid]
       alpha_prev = alphas_prev[tid]
@@ -68,7 +73,7 @@ class SD1xSampler:
       latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
       latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_idx{index}.npy"))
       # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_last.npy"))
-      latents = denoiser(latents, Tensor([timestep]), cond)
+      latents = denoiser(latents, Tensor([timestep]), cond, index)
       # latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_idx{index}.npy"))
       # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_last.npy"))
       uc_latent, c_latent = latents[0:1], latents[1:2]
@@ -77,7 +82,7 @@ class SD1xSampler:
 
       injc_e_t = np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_idx{index}.npy")
       a,b = e_t.numpy(), injc_e_t
-      print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      # print(f"| {index} | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
       sigma_t = 0
       sqrt_one_minus_at = (1 - alpha).sqrt()
