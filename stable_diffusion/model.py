@@ -1,11 +1,15 @@
+# TODO
+# - investigate fp16 taking more mem
+# - add SDv2
+
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from tinygrad import Tensor, TinyJit, dtypes # type: ignore
+from tinygrad import Tensor, TinyJit, dtypes, Device # type: ignore
 from tinygrad.helpers import fetch, Context, getenv # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict, torch_load # type: ignore
 
-from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
+from stable_diffusion import append_dims, LegacyDDPMDiscretization # type: ignore
 from stable_diffusion.embedders import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, ConcatTimestepEmbedderND
 from stable_diffusion.first_stage import FirstStageModel # type: ignore
 from stable_diffusion.unet import DiffusionModel
@@ -275,12 +279,6 @@ configs: Dict = {
   # }
 }
 
-def compare_state_dicts(left_state_dict:Dict, right_state_dict:Dict, left_name:str="Model", right_name:str="Weights") -> None:
-  left_keys, right_keys = set(left_state_dict.keys()), set(right_state_dict.keys())
-  left_only, right_only = left_keys.difference(right_keys), right_keys.difference(left_keys)
-  blocks = ["\n".join([f"\n{n} Only:"]+sorted(list(s))) for s,n in ((left_only,left_name), (right_only,right_name)) if len(s) > 0]
-  print("Both state dicts contain the same keys" if len(blocks) == 0 else "\n".join(blocks)+"\n")
-
 def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:Optional[str]=None, fp16:bool=False) -> StableDiffusion:
   config = configs.get(config_key, None)
   assert config is not None, f"Invalid architecture key '{args.arch}', expected value in {list(configs.keys())}"
@@ -300,10 +298,14 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
   state_dict = loader(weights_fn)
 
+  print(Device.DEFAULT)
   for k,v in state_dict.items():
-    if fp16:
-      state_dict[k] = v.cast(dtypes.float16)
+    if fp16 and (k.startswith("model.") or k.startswith("conditioner.")):
+      # only some weights should be cast
+      # and yes SDv1's conditioner is called something else, you get bad results with fp16 on that
+      state_dict[k] = v.to(Device.DEFAULT).cast(dtypes.float16)
     if re.match(r'model\.diffusion_model\..+_block.+proj_[a-z]+\.weight', k):
+      # SDv1 has issue where weights with this pattern are shape (3,3,1,1) when we expect (3,3)
       state_dict[k] = v.squeeze()
   load_state_dict(model, state_dict, strict=False)
 

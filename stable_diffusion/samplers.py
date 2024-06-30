@@ -1,5 +1,5 @@
 from tinygrad import Tensor, GlobalCounters, Device # type: ignore
-from tinygrad.helpers import trange, tqdm, Timing # type: ignore
+from tinygrad.helpers import tqdm, Timing # type: ignore
 from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
 
 from typing import Dict, Tuple, Optional
