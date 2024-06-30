@@ -228,45 +228,45 @@ configs: Dict = {
   },
 
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_refiner.yaml
-  "SDXL_Refiner": {
-    "class": SDXL,
-    "args": {
-      "model": {
-        "adm_in_ch": 2560,
-        "in_ch": 4,
-        "out_ch": 4,
-        "model_ch": 384,
-        "attention_resolutions": [4, 2],
-        "num_res_blocks": 2,
-        "channel_mult": [1, 2, 4, 4],
-        "d_head": 64,
-        "transformer_depth": [4, 4, 4, 4],
-        "ctx_dim": [1280, 1280, 1280, 1280],
-      },
-      "conditioner": {
-        "embedders": [
-          { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
-          { "class": FrozenOpenClipEmbedder,   "args": {} },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "target_size_as_tuple"   } },
-        ],
-      },
-      "first_stage_model": {
-        "ch": 128,
-        "in_ch": 3,
-        "out_ch": 3,
-        "z_ch": 4,
-        "ch_mult": [1, 2, 4, 4],
-        "num_res_blocks": 2,
-        "resolution": 256,
-      },
-      "denoiser": {
-        "num_idx": 1000,
-      },
-      "num_timesteps": 1000,
-    }
-  }
+  # "SDXL_Refiner": {
+  #   "class": SDXL,
+  #   "args": {
+  #     "model": {
+  #       "adm_in_ch": 2560,
+  #       "in_ch": 4,
+  #       "out_ch": 4,
+  #       "model_ch": 384,
+  #       "attention_resolutions": [4, 2],
+  #       "num_res_blocks": 2,
+  #       "channel_mult": [1, 2, 4, 4],
+  #       "d_head": 64,
+  #       "transformer_depth": [4, 4, 4, 4],
+  #       "ctx_dim": [1280, 1280, 1280, 1280],
+  #     },
+  #     "conditioner": {
+  #       "embedders": [
+  #         { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
+  #         { "class": FrozenOpenClipEmbedder,   "args": {} },
+  #         { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
+  #         { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
+  #         { "class": ConcatTimestepEmbedderND, "args": { "input_key": "target_size_as_tuple"   } },
+  #       ],
+  #     },
+  #     "first_stage_model": {
+  #       "ch": 128,
+  #       "in_ch": 3,
+  #       "out_ch": 3,
+  #       "z_ch": 4,
+  #       "ch_mult": [1, 2, 4, 4],
+  #       "num_res_blocks": 2,
+  #       "resolution": 256,
+  #     },
+  #     "denoiser": {
+  #       "num_idx": 1000,
+  #     },
+  #     "num_timesteps": 1000,
+  #   }
+  # }
 }
 
 def compare_state_dicts(left_state_dict:Dict, right_state_dict:Dict, left_name:str="Model", right_name:str="Weights") -> None:
@@ -313,7 +313,7 @@ if __name__ == "__main__":
   defaults = {
     "SD1x":         { "width": 512,  "height": 512  },
     "SDXL":         { "width": 1024, "height": 1024 },
-    "SDXL_Refiner": { "width": 1024, "height": 1024 },
+    # "SDXL_Refiner": { "width": 1024, "height": 1024 },
   }[arch_args.arch]
 
   parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
