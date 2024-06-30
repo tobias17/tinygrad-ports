@@ -23,7 +23,7 @@ class VanillaCFG:
 
 class Sampler(ABC):
   @abstractmethod
-  def __init__(self, cfg_scale:float):
+  def __init__(self, cfg_scale:float, timing:bool):
     pass
   @abstractmethod
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
@@ -31,7 +31,7 @@ class Sampler(ABC):
 
 curr_index = 999
 
-class SD1xSampler:
+class SDv1Sampler(Sampler):
   def __init__(self, cfg_scale:float, timing:bool):
     self.cfg_scale = cfg_scale
     self.timing = timing
@@ -70,7 +70,7 @@ class SD1xSampler:
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
-class DPMPP2MSampler:
+class DPMPP2MSampler(Sampler):
   def __init__(self, cfg_scale:float, timing:bool):
     self.timing = timing
     self.discretization = LegacyDDPMDiscretization()

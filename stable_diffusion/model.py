@@ -1,7 +1,3 @@
-# TODO
-# - Change SD1x to SDv1
-# - Remove sigma_t from sampler
-
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -13,9 +9,9 @@ from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscreti
 from stable_diffusion.embedders import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, ConcatTimestepEmbedderND
 from stable_diffusion.first_stage import FirstStageModel # type: ignore
 from stable_diffusion.unet import DiffusionModel
-from stable_diffusion.samplers import DPMPP2MSampler, SD1xSampler
+from stable_diffusion.samplers import Sampler, SDv1Sampler, DPMPP2MSampler
 
-from typing import Dict, Tuple, List, Set, Optional
+from typing import Dict, Tuple, List, Set, Optional, Type
 from abc import ABC, abstractmethod
 import os, argparse, tempfile, re
 from pathlib import Path
@@ -63,6 +59,7 @@ def prep_for_jit(*tensors:Tensor) -> Tuple[Tensor,...]:
   return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
 class StableDiffusion(ABC):
+  samplers: Dict[str,Type[Sampler]] # the first entry in the dict is considered default
   @abstractmethod
   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
     pass
@@ -76,7 +73,11 @@ class StableDiffusion(ABC):
   def delete_conditioner(self) -> None:
     pass
 
-class StableDiffusion1x(StableDiffusion):
+class StableDiffusionV1(StableDiffusion):
+  samplers = {
+    "basic": SDv1Sampler,
+  }
+
   def __init__(self, first_stage_model:Dict, model:Dict, num_timesteps:int):
     self.cond_stage_model = FrozenClosedClipEmbedder()
     self.first_stage_model = FirstStageModel(**first_stage_model)
@@ -104,6 +105,10 @@ class StableDiffusion1x(StableDiffusion):
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
+  samplers = {
+    "dpmpp2m": DPMPP2MSampler,
+  }
+
   def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
     self.conditioner = GeneralConditioner(**conditioner)
     self.first_stage_model = FirstStageModel(**first_stage_model)
@@ -160,9 +165,9 @@ class SDXL(StableDiffusion):
 
 configs: Dict = {
   # https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/configs/stable-diffusion/v1-inference.yaml
-  "SD1x": {
+  "SDv1": {
     "default_weights_url": "https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt",
-    "class": StableDiffusion1x,
+    "class": StableDiffusionV1,
     "args": {
       "model": {
         "adm_in_ch": None,
@@ -295,9 +300,6 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
   state_dict = loader(weights_fn)
 
-  # from tinygrad.nn.state import get_state_dict
-  # compare_state_dicts(get_state_dict(model), state_dict)
-
   for k,v in state_dict.items():
     if fp16:
       state_dict[k] = v.cast(dtypes.float16)
@@ -308,22 +310,27 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   return model
 
 if __name__ == "__main__":
-  arch_parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  arch_parser.add_argument('--arch', type=str, default="SD1x", choices=list(configs.keys()), help="What architecture to use")
+  arch_parser = argparse.ArgumentParser(description="Run SDXL", add_help=False)
+  arch_parser.add_argument('--arch', type=str, default="SDv1", choices=list(configs.keys()))
   arch_args, _ = arch_parser.parse_known_args()
   defaults = {
-    "SD1x":         { "width": 512,  "height": 512  },
-    "SDXL":         { "width": 1024, "height": 1024 },
+    "SDv1": { "width": 512,  "height": 512,  "guidance": 7.5, "sampler": "basic" },
+    "SDXL": { "width": 1024, "height": 1024, "guidance": 6.0, "sampler": "dpmpp2m" },
     # "SDXL_Refiner": { "width": 1024, "height": 1024 },
   }[arch_args.arch]
+  sampler_options = list(configs[arch_args.arch]["class"].samplers.keys())
 
-  parser = argparse.ArgumentParser(description="Run SDXL", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('--arch',        type=str,   default="SD1x", choices=list(configs.keys()), help="What architecture to use")
+  parser = argparse.ArgumentParser(
+    description="Run StableDiffusion. Note that changing the architecture with --arch will change some defaults and options, so set that option before running --help.",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter
+  )
+  parser.add_argument('--arch',        type=str,   default="SDv1", choices=list(configs.keys()), help="Model architecture to use")
+  parser.add_argument('--sampler',     type=str,   choices=sampler_options, default=sampler_options[0], help="Sampler to use for generation")
   parser.add_argument('--steps',       type=int,   default=10, help="The number of diffusion steps")
   parser.add_argument('--prompt',      type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
   parser.add_argument('--out',         type=str,   default=Path(tempfile.gettempdir())/"rendered.png", help="Output filename")
   parser.add_argument('--seed',        type=int,   help="Set the random latent seed")
-  parser.add_argument('--guidance',    type=float, default=7.5, help="Prompt strength")
+  parser.add_argument('--guidance',    type=float, default=defaults["guidance"], help="Prompt strength")
   parser.add_argument('--width',       type=int,   default=defaults["width"],  help="The output image width")
   parser.add_argument('--height',      type=int,   default=defaults["height"], help="The output image height")
   parser.add_argument('--aesthetic',   type=float, default=5.0, help="Aesthetic store for conditioning, only for SDXL_Refiner")
@@ -357,7 +364,10 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = DPMPP2MSampler(args.guidance, args.timing)
+  SamplerCls = model.samplers.get(args.sampler, None)
+  assert SamplerCls is not None, f"Somehow failed to resolve sampler '{args.sampler}' from {model.__class__.__name__} class"
+
+  sampler = SamplerCls(args.guidance, args.timing)
   with Context(BEAM=getenv("LATEBEAM")):
     z = sampler(model.denoise, randn, c, uc, args.steps)
   print("created samples")
