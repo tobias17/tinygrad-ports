@@ -62,6 +62,7 @@ class SD1xSampler:
         pred_x0 = (x - sqrt_one_minus_at * e_t) / alpha.sqrt()
         dir_xt = (1. - alpha_prev).sqrt() * e_t
         x = alpha_prev.sqrt() * pred_x0 + dir_xt
+
         if self.timing: Device[Device.DEFAULT].synchronize()
 
     return x
@@ -70,7 +71,8 @@ class SD1xSampler:
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L287
 class DPMPP2MSampler:
-  def __init__(self, cfg_scale:float):
+  def __init__(self, cfg_scale:float, timing:bool):
+    self.timing = timing
     self.discretization = LegacyDDPMDiscretization()
     self.guider = VanillaCFG(cfg_scale)
 
@@ -99,21 +101,25 @@ class DPMPP2MSampler:
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
     sigmas = self.discretization(num_steps)
     x *= Tensor.sqrt(1.0 + sigmas[0] ** 2.0)
-    num_sigmas = len(sigmas)
 
     old_denoised = None
-    for i in trange(num_sigmas - 1):
-      x, old_denoised = self.sampler_step(
-        old_denoised=old_denoised,
-        prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),
-        sigma=sigmas[i].reshape(x.shape[0]),
-        next_sigma=sigmas[i+1].reshape(x.shape[0]),
-        denoiser=denoiser,
-        x=x,
-        c=c,
-        uc=uc,
-      )
-      x.realize()
-      old_denoised.realize()
+    for i in (t:=tqdm(range(len(sigmas) - 1))):
+      GlobalCounters.reset()
+      t.set_description(f"{i:3d}")
+      with Timing("step in ", enabled=self.timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
+        x, old_denoised = self.sampler_step(
+          old_denoised=old_denoised,
+          prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),
+          sigma=sigmas[i].reshape(x.shape[0]),
+          next_sigma=sigmas[i+1].reshape(x.shape[0]),
+          denoiser=denoiser,
+          x=x,
+          c=c,
+          uc=uc,
+        )
+        x.realize()
+        old_denoised.realize()
+
+        if self.timing: Device[Device.DEFAULT].synchronize()
 
     return x

@@ -357,7 +357,7 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = SD1xSampler(args.guidance, args.timing)
+  sampler = DPMPP2MSampler(args.guidance, args.timing)
   with Context(BEAM=getenv("LATEBEAM")):
     z = sampler(model.denoise, randn, c, uc, args.steps)
   print("created samples")
