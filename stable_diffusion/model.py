@@ -93,7 +93,7 @@ class StableDiffusion1x(StableDiffusion):
     return run(*prep_for_jit(x, tms, cond["crossattn"]))
 
   def decode(self, x:Tensor) -> Tensor:
-    return self.first_stage_model.decode(1.0 / 0.13025 * x)
+    return self.first_stage_model.decode(1 / 0.18215 * x)
 
   def delete_conditioner(self) -> None:
     del self.cond_stage_model
@@ -266,6 +266,12 @@ configs: Dict = {
   }
 }
 
+def compare_state_dicts(left_state_dict:Dict, right_state_dict:Dict, left_name:str="Model", right_name:str="Weights") -> None:
+  left_keys, right_keys = set(left_state_dict.keys()), set(right_state_dict.keys())
+  left_only, right_only = left_keys.difference(right_keys), right_keys.difference(left_keys)
+  blocks = ["\n".join([f"\n{n} Only:"]+sorted(list(s))) for s,n in ((left_only,left_name), (right_only,right_name)) if len(s) > 0]
+  print("Both state dicts contain the same keys" if len(blocks) == 0 else "\n".join(blocks)+"\n")
+
 def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:Optional[str]=None, fp16:bool=False) -> StableDiffusion:
   config = configs.get(config_key, None)
   assert config is not None, f"Invalid architecture key '{args.arch}', expected value in {list(configs.keys())}"
@@ -284,6 +290,9 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   loader = loader_map.get(ext := str(weights_fn).split(".")[-1], None)
   assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
   state_dict = loader(weights_fn)
+
+  # from tinygrad.nn.state import get_state_dict
+  # compare_state_dicts(get_state_dict(model), state_dict)
 
   for k,v in state_dict.items():
     if fp16:
@@ -310,7 +319,7 @@ if __name__ == "__main__":
   parser.add_argument('--prompt',      type=str,   default="a horse sized cat eating a bagel", help="Description of image to generate")
   parser.add_argument('--out',         type=str,   default=Path(tempfile.gettempdir())/"rendered.png", help="Output filename")
   parser.add_argument('--seed',        type=int,   help="Set the random latent seed")
-  parser.add_argument('--guidance',    type=float, default=6.0, help="Prompt strength")
+  parser.add_argument('--guidance',    type=float, default=7.5, help="Prompt strength")
   parser.add_argument('--width',       type=int,   default=defaults["width"],  help="The output image width")
   parser.add_argument('--height',      type=int,   default=defaults["height"], help="The output image height")
   parser.add_argument('--aesthetic',   type=float, default=5.0, help="Aesthetic store for conditioning, only for SDXL_Refiner")
@@ -343,9 +352,10 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = SD1xSampler(args.guidance)
-  with Context(BEAM=getenv("LATEBEAM")):
-    z = sampler(model.denoise, randn, c, uc, args.steps)
+  # sampler = SD1xSampler(args.guidance)
+  # with Context(BEAM=getenv("LATEBEAM")):
+  # z = sampler(model.denoise, randn, c, uc, args.steps)
+  z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/latent_out.npy"))
   print("created samples")
   x = model.decode(z).realize()
   print("decoded samples")
@@ -353,7 +363,6 @@ if __name__ == "__main__":
   # make image correct size and scale
   x = (x + 1.0) / 2.0
   x = x.reshape(3,args.height,args.width).permute(1,2,0).clip(0,1)*255
-  x = x.cast(dtypes.float32).realize().cast(dtypes.uint8)
   print(x.shape)
 
   im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
