@@ -454,11 +454,6 @@ if __name__ == "__main__":
   for v in uc.values(): v.realize()
   print("created conditioning")
 
-  a,b = c["crossattn"].numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd2/c_crossattn.npy")
-  print(f"| c  | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-  a,b = uc["crossattn"].numpy(), np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd2/uc_crossattn.npy")
-  print(f"| uc | {np.mean(np.abs(a - b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L101
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
@@ -469,7 +464,6 @@ if __name__ == "__main__":
   sampler = SamplerCls(args.guidance, args.timing)
   with Context(BEAM=getenv("LATEBEAM")):
     z = sampler(model.denoise, randn, c, uc, args.steps)
-  # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd2/samples_z.npy"))
   print("created samples")
   x = model.decode(z).realize()
   print("decoded samples")
