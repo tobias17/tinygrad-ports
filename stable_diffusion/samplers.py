@@ -1,5 +1,5 @@
-from tinygrad import Tensor, dtypes # type: ignore
-from tinygrad.helpers import trange, tqdm # type: ignore
+from tinygrad import Tensor, GlobalCounters, Device # type: ignore
+from tinygrad.helpers import trange, tqdm, Timing # type: ignore
 from stable_diffusion import append_dims, get_alphas_cumprod, LegacyDDPMDiscretization # type: ignore
 
 from typing import Dict, Tuple, Optional
@@ -32,9 +32,11 @@ class Sampler(ABC):
 curr_index = 999
 
 class SD1xSampler:
-  def __init__(self, cfg_scale:float):
-    self.discretization = LegacyDDPMDiscretization()
+  def __init__(self, cfg_scale:float, timing:bool):
     self.cfg_scale = cfg_scale
+    self.timing = timing
+
+    self.discretization = LegacyDDPMDiscretization()
     self.guider = VanillaCFG(cfg_scale)
     self.alphas_cumprod = get_alphas_cumprod()
 
@@ -44,20 +46,23 @@ class SD1xSampler:
     alphas_prev = Tensor([1.0]).cat(alphas[:-1])
 
     for index, timestep in (t:=tqdm(list(enumerate(timesteps))[::-1])):
-      tid        = Tensor([index])
-      alpha      = alphas     [tid]
-      alpha_prev = alphas_prev[tid]
+      GlobalCounters.reset()
+      t.set_description(f"{index:3d} {timestep:3d}")
+      with Timing("step in ", enabled=self.timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
+        tid        = Tensor([index])
+        alpha      = alphas     [tid]
+        alpha_prev = alphas_prev[tid]
 
-      latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
-      latents = denoiser(latents, Tensor([timestep]), cond)
-      uc_latent, c_latent = latents[0:1], latents[1:2]
-      e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
+        latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
+        latents = denoiser(latents, Tensor([timestep]), cond)
+        uc_latent, c_latent = latents[0:1], latents[1:2]
+        e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
 
-      sigma_t = 0
-      sqrt_one_minus_at = (1 - alpha).sqrt()
-      pred_x0 = (x - sqrt_one_minus_at * e_t) / alpha.sqrt()
-      dir_xt = (1. - alpha_prev - sigma_t**2).sqrt() * e_t
-      x = alpha_prev.sqrt() * pred_x0 + dir_xt
+        sqrt_one_minus_at = (1 - alpha).sqrt()
+        pred_x0 = (x - sqrt_one_minus_at * e_t) / alpha.sqrt()
+        dir_xt = (1. - alpha_prev).sqrt() * e_t
+        x = alpha_prev.sqrt() * pred_x0 + dir_xt
+        if self.timing: Device[Device.DEFAULT].synchronize()
 
     return x
 

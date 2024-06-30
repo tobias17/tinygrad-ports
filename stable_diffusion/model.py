@@ -331,6 +331,7 @@ if __name__ == "__main__":
   parser.add_argument('--weights-url', type=str,   help="Url to download weights from")
   parser.add_argument('--fp16',        action='store_true', help="Loads the weights as float16")
   parser.add_argument('--noshow',      action='store_true', help="Don't show the image")
+  parser.add_argument('--timing',      action='store_true', help="Print timing per step")
   args = parser.parse_args()
 
   Tensor.no_grad = True
@@ -356,10 +357,9 @@ if __name__ == "__main__":
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = SD1xSampler(args.guidance)
+  sampler = SD1xSampler(args.guidance, args.timing)
   with Context(BEAM=getenv("LATEBEAM")):
     z = sampler(model.denoise, randn, c, uc, args.steps)
-  # z = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/latent_out.npy"))
   print("created samples")
   x = model.decode(z).realize()
   print("decoded samples")
