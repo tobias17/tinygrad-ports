@@ -1,5 +1,6 @@
 # TODO
 # - Change SD1x to SDv1
+# - Remove sigma_t from sampler
 
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))

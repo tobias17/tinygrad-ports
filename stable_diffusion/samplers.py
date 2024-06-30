@@ -66,9 +66,10 @@ class SD1xSampler:
       x = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/x_in_idx{index}.npy"))
 
       latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
+      latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_idx{index}.npy"))
       # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_in_last.npy"))
       latents = denoiser(latents, Tensor([timestep]), cond)
-      latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_idx{index}.npy"))
+      # latents = Tensor(np.load(f"/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_idx{index}.npy"))
       # latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_last.npy"))
       uc_latent, c_latent = latents[0:1], latents[1:2]
       e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
