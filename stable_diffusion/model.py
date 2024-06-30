@@ -1,13 +1,12 @@
 # TODO
 # - add SDv2
-# - investigate fp16 farther
 
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from tinygrad import Tensor, TinyJit, dtypes, Device # type: ignore
+from tinygrad import Tensor, TinyJit, dtypes # type: ignore
 from tinygrad.helpers import fetch, Context, getenv # type: ignore
-from tinygrad.nn.state import safe_load, load_state_dict, torch_load # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict, torch_load, get_state_dict # type: ignore
 
 from stable_diffusion import append_dims, LegacyDDPMDiscretization # type: ignore
 from stable_diffusion.embedders import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, ConcatTimestepEmbedderND
@@ -107,49 +106,49 @@ class StableDiffusionV1(StableDiffusion):
   def delete_conditioner(self) -> None:
     del self.cond_stage_model
 
-class StableDiffusionV2(StableDiffusion):
-  samplers = {
-    "dpmpp2m": DPMPP2MSampler,
-  }
+# class StableDiffusionV2(StableDiffusion):
+#   samplers = {
+#     "dpmpp2m": DPMPP2MSampler,
+#   }
 
-  def __init__(self, conditioner:Dict, first_stage:Dict, model:Dict, num_timesteps:int):
-    self.cond_stage_model = FrozenOpenClipEmbedder(**conditioner)
-    self.first_stage_model = FirstStageModel(**first_stage)
-    self.model = DiffusionModel(**model)
+#   def __init__(self, conditioner:Dict, first_stage:Dict, model:Dict, num_timesteps:int):
+#     self.cond_stage_model = FrozenOpenClipEmbedder(**conditioner)
+#     self.first_stage_model = FirstStageModel(**first_stage)
+#     self.model = DiffusionModel(**model)
 
-    self.sigmas = LegacyDDPMDiscretization()(num_timesteps, flip=True)
+#     self.sigmas = LegacyDDPMDiscretization()(num_timesteps, flip=True)
 
-  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
-  def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
-    return {"crossattn": self.cond_stage_model(pos_prompt)}, {"crossattn": self.cond_stage_model("")}
+#   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
+#   def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
+#     return {"crossattn": self.cond_stage_model(pos_prompt)}, {"crossattn": self.cond_stage_model("")}
 
-  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
-  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+#   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
+#   def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
 
-    def sigma_to_idx(s:Tensor) -> Tensor:
-      dists = s - self.sigmas.unsqueeze(1)
-      return dists.abs().argmin(axis=0).view(*s.shape)
+#     def sigma_to_idx(s:Tensor) -> Tensor:
+#       dists = s - self.sigmas.unsqueeze(1)
+#       return dists.abs().argmin(axis=0).view(*s.shape)
 
-    sigma = self.sigmas[sigma_to_idx(sigma)]
-    sigma_shape = sigma.shape
-    sigma = append_dims(sigma, x)
+#     sigma = self.sigmas[sigma_to_idx(sigma)]
+#     sigma_shape = sigma.shape
+#     sigma = append_dims(sigma, x)
 
-    c_out   = -sigma
-    c_in    = 1 / (sigma**2 + 1.0) ** 0.5
-    c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
+#     c_out   = -sigma
+#     c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+#     c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
-    @TinyJit
-    def run(x, tms, ctx, c_out, add):
-      return (self.model.diffusion_model(x, tms, ctx, None)*c_out + add).realize()
+#     @TinyJit
+#     def run(x, tms, ctx, c_out, add):
+#       return (self.model.diffusion_model(x, tms, ctx, None)*c_out + add).realize()
 
-    return run(*prep_for_jit(x*c_in, c_noise, cond["crossattn"], c_out, x))
+#     return run(*prep_for_jit(x*c_in, c_noise, cond["crossattn"], c_out, x))
 
-  # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
-  def decode(self, x:Tensor) -> Tensor:
-    return self.first_stage_model.decode(1.0 / 0.13025 * x)
+#   # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
+#   def decode(self, x:Tensor) -> Tensor:
+#     return self.first_stage_model.decode(1.0 / 0.13025 * x)
 
-  def delete_conditioner(self) -> None:
-    del self.cond_stage_model
+#   def delete_conditioner(self) -> None:
+#     del self.cond_stage_model
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
@@ -242,41 +241,41 @@ configs: Dict = {
     },
   },
 
-  "SDv2": {
-    "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors",
-    "class": StableDiffusionV2,
-    "args": {
-      "model": {
-        "adm_in_ch": None,
-        "in_ch": 4,
-        "out_ch": 4,
-        "model_ch": 320,
-        "attention_resolutions": [4, 2, 1],
-        "num_res_blocks": 2,
-        "channel_mult": [1, 2, 4, 4],
-        "d_head": 64,
-        "transformer_depth": [1, 1, 1, 1],
-        "ctx_dim": 1024,
-      },
-      "first_stage": {
-        "ch": 128,
-        "in_ch": 3,
-        "out_ch": 3,
-        "z_ch": 4,
-        "ch_mult": [1, 2, 4, 4],
-        "num_res_blocks": 2,
-        "resolution": 256,
-      },
-      "conditioner": { 
-        "dims": 1024,
-        "n_heads": 16,
-        "layers": 24,
-        "return_pooled": False
-      },
-      "num_timesteps": 1000,
-    },
-  },
-  
+  # "SDv2": {
+  #   "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors",
+  #   "class": StableDiffusionV2,
+  #   "args": {
+  #     "model": {
+  #       "adm_in_ch": None,
+  #       "in_ch": 4,
+  #       "out_ch": 4,
+  #       "model_ch": 320,
+  #       "attention_resolutions": [4, 2, 1],
+  #       "num_res_blocks": 2,
+  #       "channel_mult": [1, 2, 4, 4],
+  #       "d_head": 64,
+  #       "transformer_depth": [1, 1, 1, 1],
+  #       "ctx_dim": 1024,
+  #     },
+  #     "first_stage": {
+  #       "ch": 128,
+  #       "in_ch": 3,
+  #       "out_ch": 3,
+  #       "z_ch": 4,
+  #       "ch_mult": [1, 2, 4, 4],
+  #       "num_res_blocks": 2,
+  #       "resolution": 256,
+  #     },
+  #     "conditioner": { 
+  #       "dims": 1024,
+  #       "n_heads": 16,
+  #       "layers": 24,
+  #       "return_pooled": False
+  #     },
+  #     "num_timesteps": 1000,
+  #   },
+  # },
+
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/configs/inference/sd_xl_base.yaml
   "SDXL": {
     "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
@@ -377,12 +376,7 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
   assert loader is not None, f"Unsupported file extension '{ext}' for weights filename, expected value in {list(loader_map.keys())}"
   state_dict = loader(weights_fn)
 
-  print(Device.DEFAULT)
   for k,v in state_dict.items():
-    if fp16 and (k.startswith("model.") or k.startswith("conditioner.")):
-      # only some weights should be cast
-      # and yes SDv1's conditioner is called something else, you get bad results with fp16 on that
-      state_dict[k] = v.to(Device.DEFAULT).cast(dtypes.float16)
     if re.match(r'model\.diffusion_model\..+_block.+proj_[a-z]+\.weight', k):
       # SDv1 has issue where weights with this pattern are shape (3,3,1,1) when we expect (3,3)
       state_dict[k] = v.squeeze()
@@ -400,6 +394,11 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
 
   load_state_dict(model, state_dict, strict=False)
 
+  if fp16:
+    for k,l in get_state_dict(model).items():
+      if (k.startswith("model.")):
+        l.replace(l.cast(dtypes.float16).realize())
+
   return model
 
 if __name__ == "__main__":
@@ -408,7 +407,7 @@ if __name__ == "__main__":
   arch_args, _ = arch_parser.parse_known_args()
   defaults = {
     "SDv1": { "width": 512,  "height": 512,  "guidance": 7.5, },
-    "SDv2": { "width": 768,  "height": 768,  "guidance": 7.5, },
+    # "SDv2": { "width": 768,  "height": 768,  "guidance": 7.5, },
     "SDXL": { "width": 1024, "height": 1024, "guidance": 6.0, },
     # "SDXL_Refiner": { "width": 1024, "height": 1024 },
   }[arch_args.arch]

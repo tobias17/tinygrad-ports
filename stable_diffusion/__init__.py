@@ -44,7 +44,3 @@ class LegacyDDPMDiscretization:
     sigmas = Tensor((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
     sigmas = Tensor.cat(Tensor.zeros((1,)), sigmas)
     return sigmas if flip else sigmas.flip(axis=0) # sigmas is "pre-flipped", need to do oposite of flag
-
-import embedders # type: ignore
-import first_stage # type: ignore
-import unet # type: ignore

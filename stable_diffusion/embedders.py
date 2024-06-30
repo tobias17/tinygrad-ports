@@ -221,7 +221,7 @@ class Closed:
       x = self.embeddings(input_ids, Tensor.arange(input_ids.shape[1]).reshape(1, -1))
       x = self.encoder(x, Tensor.full((1, 1, 77, 77), float("-inf")).triu(1), self.ret_layer_idx)
       return self.final_layer_norm(x) if (self.ret_layer_idx is None) else x
-  
+
   class ClipTextModel:
     def __init__(self, ret_layer_idx:Optional[int]):
       self.text_model = Closed.ClipTextTransformer(ret_layer_idx=ret_layer_idx)
@@ -233,7 +233,7 @@ class FrozenClosedClipEmbedder(Embedder):
     self.tokenizer   = Tokenizer.ClipTokenizer()
     self.transformer = Closed.ClipTextModel(ret_layer_idx)
     self.input_key   = "txt"
-  
+
   def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     tokens = Tensor(self.tokenizer.encode(text))
     return self.transformer.text_model(tokens.reshape(1,-1))
@@ -256,7 +256,7 @@ class Open:
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
       T,B,C = x.shape
-      
+
       proj = x.linear(self.in_proj_weight.T, self.in_proj_bias)
       proj = proj.unflatten(-1, (3,C)).unsqueeze(0).transpose(0,-2)
       q,k,v = proj.chunk(3)
@@ -276,7 +276,7 @@ class Open:
     def __init__(self, dims, hidden_dims):
       self.c_fc   = Linear(dims, hidden_dims)
       self.c_proj = Linear(hidden_dims, dims)
-    
+
     def __call__(self, x:Tensor) -> Tensor:
       return x.sequential([self.c_fc, Tensor.gelu, self.c_proj])
 
@@ -289,7 +289,7 @@ class Open:
 
       self.ln_2 = LayerNorm(dims)
       self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
-    
+
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
       x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
       x = x + self.mlp(self.ln_2(x))
@@ -302,7 +302,7 @@ class Open:
       self.resblocks = [
         Open.ResidualAttentionBlocks(dims, n_heads, mlp_ratio) for _ in range(layers)
       ]
-    
+
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
       x = x.transpose(0, 1).contiguous()
       for r in self.resblocks:
@@ -320,7 +320,7 @@ class Open:
       self.transformer = Open.ClipTransformer(dims, layers, n_heads)
       self.ln_final = LayerNorm(dims)
       self.text_projection = Tensor.empty(dims, dims)
-    
+
     @property
     def attn_mask(self) -> Tensor:
       if not hasattr(self, "_attn_mask"):
@@ -346,10 +346,10 @@ class FrozenOpenClipEmbedder(Embedder):
   def __init__(self, dims:int, n_heads:int, layers:int, return_pooled:bool):
     self.model = Open.ClipTextTransformer(dims, n_heads, layers)
     self.tokenizer = Tokenizer.ClipTokenizer()
-    
+
     self.return_pooled = return_pooled
     self.input_key = "txt"
-  
+
   def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
     for r in self.model.transformer.resblocks:
       x, penultimate = r(x, attn_mask=attn_mask), x

@@ -254,7 +254,6 @@ class UNetModel:
 
     return x.sequential(self.out)
 
-
 class DiffusionModel:
   def __init__(self, *args, **kwargs):
     self.diffusion_model = UNetModel(*args, **kwargs)

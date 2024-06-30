@@ -29,8 +29,6 @@ class Sampler(ABC):
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
     pass
 
-curr_index = 999
-
 class SDv1Sampler(Sampler):
   def __init__(self, cfg_scale:float, timing:bool):
     self.cfg_scale = cfg_scale
