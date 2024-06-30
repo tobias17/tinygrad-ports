@@ -37,28 +37,34 @@ class SD1xSampler:
     self.alphas_cumprod = get_alphas_cumprod()
 
   def __call__(self, denoiser, x:Tensor, c:Dict, uc:Dict, num_steps:int) -> Tensor:
-    # timesteps   = list(range(1, 1000, 1000//num_steps))
-    # alphas      = Tensor(self.alphas_cumprod[timesteps])
-    # alphas_prev = Tensor([1.0]).cat(alphas[:-1])
-
-    # for index, timestep in list(enumerate(timesteps))[::-1]:
-    #   tid        = Tensor([index])
-    #   alpha      = alphas     [tid]
-    #   alpha_prev = alphas_prev[tid]
-    #   print(f"tid: {tid.numpy()}")
-
-    #   latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
-    #   latents = denoiser(latents, Tensor([timestep]), cond)
-    #   uc_latent, c_latent = map(lambda l: l.squeeze(0), latents.reshape(2,*x.shape).chunk(2))
-    #   e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
-
-    #   sqrt_one_minus_at = (1 - alpha).sqrt()
-    #   pred_x0 = (x - sqrt_one_minus_at * e_t)
-    #   dir_xt = (1. - alpha_prev).sqrt() * e_t
-    #   x = alpha_prev.sqrt() * pred_x0 + dir_xt
-
     import numpy as np
-    x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/x_prev_last.npy"))
+
+    timesteps   = list(range(1, 1000, 1000//num_steps))
+    alphas      = Tensor(self.alphas_cumprod[timesteps])
+    alphas_prev = Tensor([1.0]).cat(alphas[:-1])
+
+    for index, timestep in list(enumerate(timesteps))[::-1]:
+      tid        = Tensor([index])
+      alpha      = alphas     [tid]
+      alpha_prev = alphas_prev[tid]
+      print(f"tid: {tid.numpy()}")
+      # alpha = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/alpha_t_last.npy"))
+      # alpha_prev = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/alpha_prev_last.npy"))
+      x = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/x_last_input.npy"))
+
+      # latents, _, cond = self.guider.prepare_inputs(x, None, c, uc)
+      # latents = denoiser(latents, Tensor([timestep]), cond)
+      latents = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/model_latents_out_last.npy"))
+      uc_latent, c_latent = latents[0:1], latents[1:2]
+      e_t = uc_latent + self.cfg_scale * (c_latent - uc_latent)
+      # e_t = Tensor(np.load("/home/tobi/repos/tinygrad-ports/weights/sd1x/e_t_last.npy"))
+
+      sigma_t = 0
+      sqrt_one_minus_at = (1 - alpha).sqrt()
+      pred_x0 = (x - sqrt_one_minus_at * e_t)
+      dir_xt = (1. - alpha_prev - sigma_t**2).sqrt() * e_t
+      x = alpha_prev.sqrt() * pred_x0 + dir_xt
+
     return x
 
 
