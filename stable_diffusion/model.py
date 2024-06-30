@@ -1,6 +1,6 @@
 # TODO
-# - investigate fp16 taking more mem
 # - add SDv2
+# - investigate fp16 farther
 
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -82,9 +82,9 @@ class StableDiffusionV1(StableDiffusion):
     "basic": SDv1Sampler,
   }
 
-  def __init__(self, first_stage_model:Dict, model:Dict, num_timesteps:int):
+  def __init__(self, first_stage:Dict, model:Dict, num_timesteps:int):
     self.cond_stage_model = FrozenClosedClipEmbedder()
-    self.first_stage_model = FirstStageModel(**first_stage_model)
+    self.first_stage_model = FirstStageModel(**first_stage)
     self.model = DiffusionModel(**model)
 
     disc = LegacyDDPMDiscretization()
@@ -107,15 +107,59 @@ class StableDiffusionV1(StableDiffusion):
   def delete_conditioner(self) -> None:
     del self.cond_stage_model
 
+class StableDiffusionV2(StableDiffusion):
+  samplers = {
+    "dpmpp2m": DPMPP2MSampler,
+  }
+
+  def __init__(self, conditioner:Dict, first_stage:Dict, model:Dict, num_timesteps:int):
+    self.cond_stage_model = FrozenOpenClipEmbedder(**conditioner)
+    self.first_stage_model = FirstStageModel(**first_stage)
+    self.model = DiffusionModel(**model)
+
+    self.sigmas = LegacyDDPMDiscretization()(num_timesteps, flip=True)
+
+  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/inference/helpers.py#L173
+  def create_conditioning(self, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float) -> Tuple[Dict,Dict]:
+    return {"crossattn": self.cond_stage_model(pos_prompt)}, {"crossattn": self.cond_stage_model("")}
+
+  # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
+  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+
+    def sigma_to_idx(s:Tensor) -> Tensor:
+      dists = s - self.sigmas.unsqueeze(1)
+      return dists.abs().argmin(axis=0).view(*s.shape)
+
+    sigma = self.sigmas[sigma_to_idx(sigma)]
+    sigma_shape = sigma.shape
+    sigma = append_dims(sigma, x)
+
+    c_out   = -sigma
+    c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+    c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
+
+    @TinyJit
+    def run(x, tms, ctx, c_out, add):
+      return (self.model.diffusion_model(x, tms, ctx, None)*c_out + add).realize()
+
+    return run(*prep_for_jit(x*c_in, c_noise, cond["crossattn"], c_out, x))
+
+  # https://github.com/tinygrad/tinygrad/blob/64cda3c481613f4ca98eeb40ad2bce7a9d0749a3/examples/stable_diffusion.py#L543
+  def decode(self, x:Tensor) -> Tensor:
+    return self.first_stage_model.decode(1.0 / 0.13025 * x)
+
+  def delete_conditioner(self) -> None:
+    del self.cond_stage_model
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL(StableDiffusion):
   samplers = {
     "dpmpp2m": DPMPP2MSampler,
   }
 
-  def __init__(self, conditioner:Dict, first_stage_model:Dict, model:Dict, num_timesteps:int):
+  def __init__(self, conditioner:Dict, first_stage:Dict, model:Dict, num_timesteps:int):
     self.conditioner = GeneralConditioner(**conditioner)
-    self.first_stage_model = FirstStageModel(**first_stage_model)
+    self.first_stage_model = FirstStageModel(**first_stage)
     self.model = DiffusionModel(**model)
 
     self.sigmas = LegacyDDPMDiscretization()(num_timesteps, flip=True)
@@ -185,7 +229,7 @@ configs: Dict = {
         "transformer_depth": [1, 1, 1, 1],
         "ctx_dim": 768,
       },
-      "first_stage_model": {
+      "first_stage": {
         "ch": 128,
         "in_ch": 3,
         "out_ch": 3,
@@ -193,6 +237,41 @@ configs: Dict = {
         "ch_mult": [1, 2, 4, 4],
         "num_res_blocks": 2,
         "resolution": 256,
+      },
+      "num_timesteps": 1000,
+    },
+  },
+
+  "SDv2": {
+    "default_weights_url": "https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors",
+    "class": StableDiffusionV2,
+    "args": {
+      "model": {
+        "adm_in_ch": None,
+        "in_ch": 4,
+        "out_ch": 4,
+        "model_ch": 320,
+        "attention_resolutions": [4, 2, 1],
+        "num_res_blocks": 2,
+        "channel_mult": [1, 2, 4, 4],
+        "d_head": 64,
+        "transformer_depth": [1, 1, 1, 1],
+        "ctx_dim": 1024,
+      },
+      "first_stage": {
+        "ch": 128,
+        "in_ch": 3,
+        "out_ch": 3,
+        "z_ch": 4,
+        "ch_mult": [1, 2, 4, 4],
+        "num_res_blocks": 2,
+        "resolution": 256,
+      },
+      "conditioner": { 
+        "dims": 1024,
+        "n_heads": 16,
+        "layers": 24,
+        "return_pooled": False
       },
       "num_timesteps": 1000,
     },
@@ -215,16 +294,7 @@ configs: Dict = {
         "transformer_depth": [1, 2, 10],
         "ctx_dim": 2048,
       },
-      "conditioner": {
-        "embedders": [
-          { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
-          { "class": FrozenOpenClipEmbedder,   "args": {} },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
-          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "target_size_as_tuple"   } },
-        ],
-      },
-      "first_stage_model": {
+      "first_stage": {
         "ch": 128,
         "in_ch": 3,
         "out_ch": 3,
@@ -232,6 +302,15 @@ configs: Dict = {
         "ch_mult": [1, 2, 4, 4],
         "num_res_blocks": 2,
         "resolution": 256,
+      },
+      "conditioner": {
+        "embedders": [
+          { "class": FrozenClosedClipEmbedder, "args": { "ret_layer_idx": 11 } },
+          { "class": FrozenOpenClipEmbedder,   "args": { "dims": 1280, "n_heads": 20, "layers": 32, "return_pooled": True } },
+          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "original_size_as_tuple" } },
+          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "crop_coords_top_left"   } },
+          { "class": ConcatTimestepEmbedderND, "args": { "input_key": "target_size_as_tuple"   } },
+        ],
       },
       "num_timesteps": 1000,
     },
@@ -307,6 +386,18 @@ def from_pretrained(config_key:str, weights_fn:Optional[str]=None, weights_url:O
     if re.match(r'model\.diffusion_model\..+_block.+proj_[a-z]+\.weight', k):
       # SDv1 has issue where weights with this pattern are shape (3,3,1,1) when we expect (3,3)
       state_dict[k] = v.squeeze()
+
+  # def compare_state_dicts(left_state_dict:Dict, right_state_dict:Dict, left_name:str="Model", right_name:str="Weights") -> None:
+  #   """
+  #   Compares 2 state dicts, printing which keys are missing from another for debugging purposes.
+  #   """
+  #   left_keys, right_keys = set(left_state_dict.keys()), set(right_state_dict.keys())
+  #   left_only, right_only = left_keys.difference(right_keys), right_keys.difference(left_keys)
+  #   blocks = ["\n".join([f"\n{n} Only:"]+sorted(list(s))) for s,n in ((left_only,left_name), (right_only,right_name)) if len(s) > 0]
+  #   print("Both state dicts contain the same keys" if len(blocks) == 0 else "\n".join(blocks)+"\n")
+  # from tinygrad.nn.state import get_state_dict
+  # compare_state_dicts(get_state_dict(model), state_dict)
+
   load_state_dict(model, state_dict, strict=False)
 
   return model
@@ -316,8 +407,9 @@ if __name__ == "__main__":
   arch_parser.add_argument('--arch', type=str, default="SDv1", choices=list(configs.keys()))
   arch_args, _ = arch_parser.parse_known_args()
   defaults = {
-    "SDv1": { "width": 512,  "height": 512,  "guidance": 7.5, "sampler": "basic" },
-    "SDXL": { "width": 1024, "height": 1024, "guidance": 6.0, "sampler": "dpmpp2m" },
+    "SDv1": { "width": 512,  "height": 512,  "guidance": 7.5, },
+    "SDv2": { "width": 768,  "height": 768,  "guidance": 7.5, },
+    "SDXL": { "width": 1024, "height": 1024, "guidance": 6.0, },
     # "SDXL_Refiner": { "width": 1024, "height": 1024 },
   }[arch_args.arch]
   sampler_options = list(configs[arch_args.arch]["class"].samplers.keys())
@@ -343,18 +435,18 @@ if __name__ == "__main__":
   parser.add_argument('--timing',      action='store_true', help="Print timing per step")
   args = parser.parse_args()
 
+  N = 1
+  C = 4
+  F = 8
+  SIZE_MULT = F * 4
+  assert (r := args.width  % SIZE_MULT) == 0, f"img_width must be multiple of {SIZE_MULT}, got {args.width} ({args.width} / {SIZE_MULT} = {args.width//SIZE_MULT}r{r})"
+  assert (r := args.height % SIZE_MULT) == 0, f"img_height must be multiple of {SIZE_MULT}, got {args.height} ({args.height} / {SIZE_MULT} = {args.height//SIZE_MULT}r{r})"
+
   Tensor.no_grad = True
   if args.seed is not None:
     Tensor.manual_seed(args.seed)
 
   model = from_pretrained(args.arch, args.weights_fn, args.weights_url, args.fp16)
-
-  N = 1
-  C = 4
-  F = 8
-
-  assert args.width  % F == 0, f"img_width must be multiple of {F}, got {args.width}"
-  assert args.height % F == 0, f"img_height must be multiple of {F}, got {args.height}"
 
   c, uc = model.create_conditioning(args.prompt, args.width, args.height, args.aesthetic)
   model.delete_conditioner()

@@ -3,8 +3,8 @@ from tinygrad.helpers import fetch # type: ignore
 from tinygrad.nn import Linear, LayerNorm, Embedding # type: ignore
 from stable_diffusion import timestep_embedding
 
+from typing import List, Optional, Union, Tuple
 from abc import ABC, abstractmethod
-from typing import List, Optional
 from functools import lru_cache
 import re, gzip
 
@@ -123,7 +123,7 @@ class Tokenizer:
 class Embedder(ABC):
   input_key: str
   @abstractmethod
-  def __call__(self, x:Tensor) -> Tensor:
+  def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     pass
 
 
@@ -234,7 +234,7 @@ class FrozenClosedClipEmbedder(Embedder):
     self.transformer = Closed.ClipTextModel(ret_layer_idx)
     self.input_key   = "txt"
   
-  def __call__(self, text:Tensor) -> Tensor:
+  def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     tokens = Tensor(self.tokenizer.encode(text))
     return self.transformer.text_model(tokens.reshape(1,-1))
 
@@ -314,7 +314,7 @@ class Open:
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
   class ClipTextTransformer:
-    def __init__(self, dims:int, vocab_size:int=49408, n_heads:int=20, ctx_length:int=77, layers:int=32):
+    def __init__(self, dims:int, n_heads:int, layers:int, vocab_size:int=49408, ctx_length:int=77):
       self.token_embedding = Embedding(vocab_size, dims)
       self.positional_embedding = Tensor.empty(ctx_length, dims)
       self.transformer = Open.ClipTransformer(dims, layers, n_heads)
@@ -341,26 +341,32 @@ class Open:
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
+# https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L498
 class FrozenOpenClipEmbedder(Embedder):
-  def __init__(self, dims:int=1280):
-    self.model = Open.ClipTextTransformer(dims)
-    self.input_key = "txt"
+  def __init__(self, dims:int, n_heads:int, layers:int, return_pooled:bool):
+    self.model = Open.ClipTextTransformer(dims, n_heads, layers)
     self.tokenizer = Tokenizer.ClipTokenizer()
+    
+    self.return_pooled = return_pooled
+    self.input_key = "txt"
   
   def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
     for r in self.model.transformer.resblocks:
       x, penultimate = r(x, attn_mask=attn_mask), x
     return x.permute(1,0,2), penultimate.permute(1,0,2)
 
-  def __call__(self, text:Tensor) -> Tensor:
+  def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     tokens = Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1)
 
     x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
     x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
-    x = self.model.ln_final(x)
-    pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
 
-    return penultimate, pooled
+    if self.return_pooled:
+      x = self.model.ln_final(x)
+      pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
+      return penultimate, pooled
+    else:
+      return penultimate
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913
