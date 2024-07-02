@@ -30,7 +30,7 @@ def make_ddim_timesteps(num_ddim_timesteps, num_ddpm_timesteps) -> np.ndarray:
   steps_out = ddim_timesteps + 1
   return steps_out
 
-# TODO TF: figure out what this is actually does
+# TODO [TF]: figure out what this is actually doing
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L103
 def extract_into_tensor(a:Tensor, t:Tensor, x_shape:Tuple[int,...]) -> Tensor:
   return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
@@ -106,4 +106,3 @@ params = {
 
 if __name__ == "__main__":
   pass
-
