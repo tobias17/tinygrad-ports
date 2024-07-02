@@ -3,18 +3,17 @@
 # Stability-AI/generative-models | MIT     | https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/LICENSE-CODE
 # mlfoundations/open_clip        | MIT     | https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/LICENSE
 
-from tinygrad import Tensor, TinyJit, dtypes
-from tinygrad.nn import Conv2d, GroupNorm
-from tinygrad.nn.state import safe_load, load_state_dict
-from tinygrad.helpers import fetch, trange, colored
-from extra.models.clip import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder
-from extra.models.unet import UNetModel, Upsample, Downsample, timestep_embedding
-from examples.stable_diffusion import ResnetBlock, Mid
+from tinygrad import Tensor, TinyJit, dtypes # type: ignore
+from tinygrad.nn import Conv2d, GroupNorm # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
+from tinygrad.helpers import fetch, trange, colored # type: ignore
+from extra.models.clip import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder # type: ignore
+from extra.models.unet import UNetModel, Upsample, Downsample, timestep_embedding # type: ignore
+from examples.stable_diffusion import ResnetBlock, Mid # type: ignore
 import numpy as np
 
 from typing import Dict, List, Callable, Optional, Any, Set, Tuple
 import argparse, tempfile
-from abc import ABC, abstractmethod
 from pathlib import Path
 from PIL import Image
 
@@ -45,13 +44,6 @@ def tensor_identity(x:Tensor) -> Tensor:
 class DiffusionModel:
   def __init__(self, *args, **kwargs):
     self.diffusion_model = UNetModel(*args, **kwargs)
-
-
-class Embedder(ABC):
-  input_key: str
-  @abstractmethod
-  def __call__(self, x:Tensor) -> Tensor:
-    pass
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L913

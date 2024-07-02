@@ -1,5 +1,5 @@
-from tinygrad import Tensor, dtypes
-from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm
+from tinygrad import Tensor, dtypes # type: ignore
+from tinygrad.nn import Linear, Conv2d, GroupNorm, LayerNorm # type: ignore
 
 from typing import Optional, Union, List, Any, Tuple
 import math

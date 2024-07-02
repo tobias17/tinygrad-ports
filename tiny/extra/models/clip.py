@@ -1,6 +1,6 @@
-from tinygrad import Tensor, dtypes
-from tinygrad.helpers import fetch
-from tinygrad.nn import Linear, LayerNorm, Embedding
+from tinygrad import Tensor, dtypes # type: ignore
+from tinygrad.helpers import fetch # type: ignore
+from tinygrad.nn import Linear, LayerNorm, Embedding # type: ignore
 
 from typing import List, Optional, Union, Tuple
 from abc import ABC, abstractmethod

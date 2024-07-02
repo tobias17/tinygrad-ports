@@ -8,12 +8,12 @@ from typing import Dict, Any
 
 from PIL import Image
 import numpy as np
-from tinygrad import Device, GlobalCounters, dtypes, Tensor, TinyJit
-from tinygrad.helpers import Timing, Context, getenv, fetch, colored, tqdm
-from tinygrad.nn import Conv2d, GroupNorm
-from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict
-from extra.models.clip import Closed, Tokenizer
-from extra.models.unet import UNetModel
+from tinygrad import Device, GlobalCounters, dtypes, Tensor, TinyJit # type: ignore
+from tinygrad.helpers import Timing, Context, getenv, fetch, colored, tqdm # type: ignore
+from tinygrad.nn import Conv2d, GroupNorm # type: ignore
+from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict # type: ignore
+from extra.models.clip import Closed, Tokenizer # type: ignore
+from extra.models.unet import UNetModel # type: ignore
 
 class AttnBlock:
   def __init__(self, in_channels):
