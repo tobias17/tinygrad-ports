@@ -5,7 +5,7 @@ from examples.sdxl import append_dims # type: ignore
 from extra.models.unet import UNetModel # type: ignore
 from extra.models.clip import FrozenOpenClipEmbedder # type: ignore
 
-from typing import Dict
+from typing import Dict, Tuple
 import numpy as np
 
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L521
@@ -30,6 +30,11 @@ def make_ddim_timesteps(num_ddim_timesteps, num_ddpm_timesteps) -> np.ndarray:
   steps_out = ddim_timesteps + 1
   return steps_out
 
+# TODO TF: figure out what this is actually does
+# https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L103
+def extract_into_tensor(a:Tensor, t:Tensor, x_shape:Tuple[int,...]) -> Tensor:
+  return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
+
 class DdimSampler:
   def __init__(self, ddpm_num_timesteps:int, scale:float):
     self.ddpm_num_timesteps = ddpm_num_timesteps
@@ -42,18 +47,24 @@ class DdimSampler:
     alphas = model.alphas_cumprod[ddim_timesteps]
     alphas_prev = model.alphas_cumprod[0].cat(alphas[:-1])
     sqrt_one_minus_alphas = Tensor.sqrt(1.0 - alphas)
+    sqrt_alphas_cumprod = model.alphas_cumprod.sqrt()
+
     sigmas = eta * Tensor.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
     c_in = Tensor.cat(uc, c)
 
     time_range = np.flip(ddim_timesteps)
     for i, timestep in enumerate(t := tqdm(time_range)):
-      x_uc, x_c = model(Tensor.cat(x,x), Tensor.full((2,),timestep), c_in).chunk(2)
-      model_output = x_uc + self.scale * (x_c - x_uc)
+      x_t = Tensor.cat(x,x)
+      t   = Tensor.full((2,),timestep)
+      x_uc, x_c = model(x_t, t, c_in).chunk(2)
+      output = x_uc + self.scale * (x_c - x_uc)
 
       if model.parameterization == "v":
-        pass # TODO
+        # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L296
+        e_t = extract_into_tensor(sqrt_alphas_cumprod, t, x_t.shape)   * output \
+            + extract_into_tensor(sqrt_one_minus_alphas, t, x_t.shape) * x_t
       else:
-        e_t = model_output
+        e_t = output
 
       index   = ddim_timesteps.shape[0] - i - i
       a_t     = alphas[index]     .reshape(x.shape[0], 1, 1, 1)
@@ -64,7 +75,12 @@ class DdimSampler:
       if model.parameterization != "v":
         pred_x0 = (x - sqrt_one_minus_at * eta) / a_t.sqrt()
       else:
-        pass # TODO
+        # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L288
+        pred_x0 = extract_into_tensor(sqrt_alphas_cumprod,   t, x_t.shape) * x_t \
+                - extract_into_tensor(sqrt_one_minus_alphas, t, x_t.shape) * output
+
+      dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
+      x = a_prev.sqrt() * pred_x0 + dir_xt
 
 params = {
   "unet_config": {
