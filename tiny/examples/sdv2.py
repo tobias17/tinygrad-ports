@@ -125,6 +125,7 @@ params: Dict = {
     "n_heads": 16,
     "layers": 24,
     "return_pooled": False,
+    "ln_penultimate": True,
   }
 }
 
@@ -163,6 +164,11 @@ if __name__ == "__main__":
   uc = model.cond_stage_model("")
   del model.cond_stage_model
   print("created conditioning")
+
+  a,b = c.numpy(), np.load("/home/tobi/weights/sd2/c_crossattn.npy")
+  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+  a,b = uc.numpy(), np.load("/home/tobi/weights/sd2/uc_crossattn.npy")
+  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
   
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
