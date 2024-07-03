@@ -1,11 +1,14 @@
-from tinygrad import Tensor # type: ignore
-from tinygrad.helpers import tqdm # type: ignore
+from tinygrad import Tensor, dtypes # type: ignore
+from tinygrad.helpers import tqdm, fetch # type: ignore
+from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
 from examples.stable_diffusion import AutoencoderKL, get_alphas_cumprod # type: ignore
-from examples.sdxl import append_dims # type: ignore
 from extra.models.unet import UNetModel # type: ignore
 from extra.models.clip import FrozenOpenClipEmbedder # type: ignore
 
 from typing import Dict, Tuple
+import argparse, tempfile
+from pathlib import Path
+from PIL import Image
 import numpy as np
 
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L521
@@ -17,8 +20,11 @@ class StableDiffusionV2:
     self.alphas_cumprod    = get_alphas_cumprod()
     self.parameterization  = parameterization
   
-  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor):
+  def denoise(self, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
     return self.model(x, tms, ctx)
+
+  def decode(self, x:Tensor) -> Tensor:
+    return self.first_stage_model(1.0 / 0.18215 * x)
 
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L53
 def make_ddim_timesteps(num_ddim_timesteps, num_ddpm_timesteps) -> np.ndarray:
@@ -30,7 +36,6 @@ def make_ddim_timesteps(num_ddim_timesteps, num_ddpm_timesteps) -> np.ndarray:
   steps_out = ddim_timesteps + 1
   return steps_out
 
-# TODO [TF]: figure out what this is actually doing
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L103
 def extract_into_tensor(a:Tensor, t:Tensor, x_shape:Tuple[int,...]) -> Tensor:
   return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
@@ -40,7 +45,7 @@ class DdimSampler:
     self.ddpm_num_timesteps = ddpm_num_timesteps
     self.scale = scale
 
-  def sample(self, steps:int, model:StableDiffusionV2, x:Tensor, c:Tensor, uc:Tensor, eta:float=0.0):
+  def __call__(self, model:StableDiffusionV2, x:Tensor, c:Tensor, uc:Tensor, steps:int, eta:float=0.0):
     ddim_timesteps = make_ddim_timesteps(steps, self.ddpm_num_timesteps)
     assert model.alphas_cumprod.shape[0] == self.ddpm_num_timesteps
 
@@ -56,7 +61,7 @@ class DdimSampler:
     for i, timestep in enumerate(t := tqdm(time_range)):
       x_t = Tensor.cat(x,x)
       t   = Tensor.full((2,),timestep)
-      x_uc, x_c = model(x_t, t, c_in).chunk(2)
+      x_uc, x_c = model.denoise(x_t, t, c_in).chunk(2)
       output = x_uc + self.scale * (x_c - x_uc)
 
       if model.parameterization == "v":
@@ -82,7 +87,7 @@ class DdimSampler:
       dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
       x = a_prev.sqrt() * pred_x0 + dir_xt
 
-params = {
+params: Dict = {
   "unet_config": {
     "adm_in_ch": None,
     "in_ch": 4,
@@ -105,4 +110,53 @@ params = {
 }
 
 if __name__ == "__main__":
-  pass
+  default_prompt = "a horse sized cat eating a bagel"
+  parser = argparse.ArgumentParser(description='Run Stable Diffusion', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+  parser.add_argument('--steps', type=int, default=5, help="Number of steps in diffusion")
+  parser.add_argument('--prompt', type=str, default=default_prompt, help="Phrase to render")
+  parser.add_argument('--out', type=str, default=Path(tempfile.gettempdir()) / "rendered.png", help="Output filename")
+  parser.add_argument('--noshow', action='store_true', help="Don't show the image")
+  parser.add_argument('--fp16', action='store_true', help="Cast the weights to float16")
+  parser.add_argument('--timing', action='store_true', help="Print timing per step")
+  parser.add_argument('--seed', type=int, help="Set the random latent seed")
+  parser.add_argument('--guidance', type=float, default=7.5, help="Prompt strength")
+  args = parser.parse_args()
+
+  N = 1
+  C = 4
+  F = 8
+  assert args.width  % F == 0, f"img_width must be multiple of {F}, got {args.width}"
+  assert args.height % F == 0, f"img_height must be multiple of {F}, got {args.height}"
+
+  Tensor.no_grad = True
+  model = StableDiffusionV2(**params)
+
+  default_weight_url = 'https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors'
+  weights = args.weights if args.weights else fetch(default_weight_url, 'v2-1_768-ema-pruned.safetensors')
+  load_state_dict(model, safe_load(weights), strict=False)
+
+  c  = model.cond_stage_model(args.prompt)
+  uc = model.cond_stage_model("")
+  del model.cond_stage_model
+  print("created conditioning")
+  
+  shape = (N, C, args.height // F, args.width // F)
+  randn = Tensor.randn(shape)
+
+  sampler = DdimSampler(1000, args.guidance)
+  z = sampler(model, randn, c, uc, args.steps)
+  print("created samples")
+  x = model.decode(z).realize()
+  print("decoded samples")
+
+  # make image correct size and scale
+  x = (x + 1.0) / 2.0
+  x = x.reshape(3,args.height,args.width).permute(1,2,0).clip(0,1).mul(255).cast(dtypes.uint8)
+  print(x.shape)
+
+  im = Image.fromarray(x.numpy())
+  print(f"saving {args.out}")
+  im.save(args.out)
+
+  if not args.noshow:
+    im.show()
