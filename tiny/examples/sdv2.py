@@ -11,17 +11,21 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 
+class DiffusionModel:
+  def __init__(self, model:UNetModel):
+    self.diffusion_model = model
+
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L521
 class StableDiffusionV2:
   def __init__(self, unet_config:Dict, cond_stage_config:Dict, parameterization:str="v"):
-    self.model             = UNetModel(**unet_config)
+    self.model             = DiffusionModel(UNetModel(**unet_config))
     self.first_stage_model = AutoencoderKL()
     self.cond_stage_model  = FrozenOpenClipEmbedder(**cond_stage_config)
     self.alphas_cumprod    = get_alphas_cumprod()
     self.parameterization  = parameterization
   
   def denoise(self, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
-    return self.model(x, tms, ctx)
+    return self.model.diffusion_model(x, tms, ctx)
 
   def decode(self, x:Tensor, height:int, width:int) -> Tensor:
     x = self.first_stage_model.post_quant_conv(1/0.18215 * x)
