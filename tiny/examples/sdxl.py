@@ -334,6 +334,9 @@ class DPMPP2MSampler:
 
     old_denoised = None
     for i in trange(num_sigmas - 1):
+      if i == 5:
+        x = Tensor(np.load(f"/home/tobi/weights/sd2/x_{i}.npy"))
+        old_denoised = Tensor(np.load(f"/home/tobi/weights/sd2/od_{i}.npy"))
       x, old_denoised = self.sampler_step(
         old_denoised=old_denoised,
         prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),

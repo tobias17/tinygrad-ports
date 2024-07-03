@@ -1,9 +1,14 @@
 from tinygrad import Tensor, dtypes, TinyJit # type: ignore
 from tinygrad.helpers import tqdm, fetch # type: ignore
 from tinygrad.nn.state import safe_load, load_state_dict # type: ignore
-from examples.stable_diffusion import AutoencoderKL, get_alphas_cumprod # type: ignore
-from extra.models.unet import UNetModel # type: ignore
-from extra.models.clip import FrozenOpenClipEmbedder # type: ignore
+
+import sys
+sys.path.append("/home/tobi/repos/tinygrad-ports/tiny/examples")
+sys.path.append("/home/tobi/repos/tinygrad-ports/tiny/extra")
+from stable_diffusion import AutoencoderKL, get_alphas_cumprod # type: ignore
+from sdxl import DPMPP2MSampler, append_dims, LegacyDDPMDiscretization # type: ignore
+from models.unet import UNetModel # type: ignore
+from models.clip import FrozenOpenClipEmbedder # type: ignore
 
 from typing import Dict, Tuple
 import argparse, tempfile, os
@@ -15,6 +20,10 @@ class DiffusionModel:
   def __init__(self, model:UNetModel):
     self.diffusion_model = model
 
+@TinyJit
+def run(model, x, tms, ctx, c_out, add):
+  return (model(x, tms, ctx)*c_out + add).realize()
+
 # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L521
 class StableDiffusionV2:
   def __init__(self, unet_config:Dict, cond_stage_config:Dict, parameterization:str="v"):
@@ -23,9 +32,31 @@ class StableDiffusionV2:
     self.cond_stage_model  = FrozenOpenClipEmbedder(**cond_stage_config)
     self.alphas_cumprod    = get_alphas_cumprod()
     self.parameterization  = parameterization
+
+    self.discretization = LegacyDDPMDiscretization()
+    self.sigmas = self.discretization(1000, flip=True)
   
-  def denoise(self, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
-    return self.model.diffusion_model(x, tms, ctx)
+  # def denoise(self, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
+  #   return self.model.diffusion_model(x, tms, ctx)
+  
+  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+
+    def sigma_to_idx(s:Tensor) -> Tensor:
+      dists = s - self.sigmas.unsqueeze(1)
+      return dists.abs().argmin(axis=0).view(*s.shape)
+
+    sigma = self.sigmas[sigma_to_idx(sigma)]
+    sigma_shape = sigma.shape
+    sigma = append_dims(sigma, x)
+
+    c_out   = -sigma
+    c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+    c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
+
+    def prep(*tensors:Tensor):
+      return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
+    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], c_out, x))
 
   def decode(self, x:Tensor, height:int, width:int) -> Tensor:
     x = self.first_stage_model.post_quant_conv(1/0.18215 * x)
@@ -167,14 +198,21 @@ if __name__ == "__main__":
 
   a,b = c.numpy(), np.load("/home/tobi/weights/sd2/c_crossattn.npy")
   print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+  c = Tensor(b)
   a,b = uc.numpy(), np.load("/home/tobi/weights/sd2/uc_crossattn.npy")
   print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+  uc = Tensor(b)
   
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
 
-  sampler = DdimSampler(1000, args.guidance)
-  z = sampler(model, randn, c, uc, args.steps)
+  def denoise(model, x, tms, ctx, y):
+    return model.denoise(x, tms, ctx)
+
+  # sampler = DdimSampler(1000, args.guidance)
+  sampler = DPMPP2MSampler(args.guidance)
+  z = sampler(model.denoise, randn, {"crossattn":c}, {"crossattn":uc}, args.steps)
+  # z = Tensor(np.load("/home/tobi/weights/sd2/samples_z.npy"))
   print("created samples")
   x = model.decode(z, args.height, args.width).realize()
   print("decoded samples")
