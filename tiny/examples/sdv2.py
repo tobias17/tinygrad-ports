@@ -49,14 +49,15 @@ class StableDiffusionV2:
     sigma_shape = sigma.shape
     sigma = append_dims(sigma, x)
 
-    c_out   = -sigma
-    c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+    c_skip = 1.0 / (sigma**2 + 1.0)
+    c_out = -sigma / (sigma**2 + 1.0) ** 0.5
+    c_in = 1.0 / (sigma**2 + 1.0) ** 0.5
     c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
     def prep(*tensors:Tensor):
       return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], c_out, x))
+    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], c_out, x*c_skip))
 
   def decode(self, x:Tensor, height:int, width:int) -> Tensor:
     x = self.first_stage_model.post_quant_conv(1/0.18215 * x)
