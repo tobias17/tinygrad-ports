@@ -36,9 +36,6 @@ class StableDiffusionV2:
     self.discretization = LegacyDDPMDiscretization()
     self.sigmas = self.discretization(1000, flip=True)
   
-  # def denoise(self, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
-  #   return self.model.diffusion_model(x, tms, ctx)
-  
   def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
 
     def sigma_to_idx(s:Tensor) -> Tensor:
@@ -66,76 +63,6 @@ class StableDiffusionV2:
     # make image correct size and scale
     x = (x + 1.0) / 2.0
     x = x.reshape(3,height,width).permute(1,2,0).clip(0,1).mul(255).cast(dtypes.uint8)
-    return x
-
-# https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L53
-def make_ddim_timesteps(num_ddim_timesteps, num_ddpm_timesteps) -> np.ndarray:
-  # assume uniform
-  c = num_ddpm_timesteps // num_ddim_timesteps
-  ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
-
-  # add one to get the final alpha values right (the ones from first scale to data during sampling)
-  steps_out = ddim_timesteps + 1
-  return steps_out
-
-# https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/modules/diffusionmodules/util.py#L103
-def extract_into_tensor(a:Tensor, t:Tensor, x_shape:Tuple[int,...]) -> Tensor:
-  return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
-
-class DdimSampler:
-  def __init__(self, ddpm_num_timesteps:int, scale:float):
-    self.ddpm_num_timesteps = ddpm_num_timesteps
-    self.scale = scale
-
-  def __call__(self, model:StableDiffusionV2, x:Tensor, c:Tensor, uc:Tensor, steps:int, eta:float=0.0) -> Tensor:
-    ddim_timesteps = make_ddim_timesteps(steps, self.ddpm_num_timesteps)
-    assert model.alphas_cumprod.shape[0] == self.ddpm_num_timesteps
-
-    alphas = model.alphas_cumprod[Tensor(ddim_timesteps)]
-    alphas_prev = Tensor.cat(model.alphas_cumprod[:1], alphas[:-1])
-    sqrt_one_minus_alphas_cumprod = Tensor.sqrt(1.0 - model.alphas_cumprod)
-    sqrt_alphas_cumprod = model.alphas_cumprod.sqrt()
-
-    sigmas = eta * Tensor.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
-    c_in = Tensor.cat(uc, c)
-
-    # @TinyJit
-    def run(denoiser, x:Tensor, tms:Tensor, ctx:Tensor) -> Tensor:
-      return denoiser(x, tms, ctx).realize()
-
-    def prep_for_jit(*tensors:Tensor) -> Tuple[Tensor,...]:
-      return tuple(t.cast(dtypes.float16).realize() for t in tensors)
-
-    time_range = np.flip(ddim_timesteps).tolist()
-    for i, timestep in enumerate(tqdm(time_range)):
-      x_in = Tensor.cat(x,x)
-      tms  = Tensor([timestep])
-      x_uc, x_c = run(model.denoise, *prep_for_jit(x_in, tms.cat(tms), c_in)).chunk(2)
-      output = x_uc + self.scale * (x_c - x_uc)
-
-      if model.parameterization == "v":
-        # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L296
-        e_t = extract_into_tensor(sqrt_alphas_cumprod,           tms, x_in.shape) * output \
-            + extract_into_tensor(sqrt_one_minus_alphas_cumprod, tms, x_in.shape) * output
-      else:
-        e_t = output
-
-      index   = ddim_timesteps.shape[0] - i - 1
-      a_t     = alphas[index]     .reshape(x.shape[0], 1, 1, 1)
-      a_prev  = alphas_prev[index].reshape(x.shape[0], 1, 1, 1)
-      sigma_t = sigmas[index]     .reshape(x.shape[0], 1, 1, 1)
-      sqrt_one_minus_at = sqrt_one_minus_alphas_cumprod[index].reshape(x.shape[0], 1, 1, 1)
-
-      if model.parameterization != "v":
-        pred_x0 = (x - sqrt_one_minus_at * eta) / a_t.sqrt()
-      else:
-        # https://github.com/Stability-AI/stablediffusion/blob/cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf/ldm/models/diffusion/ddpm.py#L288
-        pred_x0 = extract_into_tensor(sqrt_alphas_cumprod,           tms, x_in.shape) * output \
-                - extract_into_tensor(sqrt_one_minus_alphas_cumprod, tms, x_in.shape) * output
-
-      dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
-      x = a_prev.sqrt() * pred_x0 + dir_xt
-    
     return x
 
 params: Dict = {
@@ -173,6 +100,7 @@ if __name__ == "__main__":
   parser.add_argument('--height',      type=int,   default=768, help="The output image height")
   parser.add_argument('--weights-fn',  type=str,   help="Filename of weights to use")
   parser.add_argument('--weights-url', type=str,   help="Custom URL to download weights from")
+  parser.add_argument('--timing',      action='store_true', help="Print timing per step")
   parser.add_argument('--noshow',      action='store_true', help="Don't show the image")
   args = parser.parse_args()
 
@@ -183,6 +111,9 @@ if __name__ == "__main__":
   assert args.height % F == 0, f"img_height must be multiple of {F}, got {args.height}"
 
   Tensor.no_grad = True
+  if args.seed:
+    Tensor.manual_seed(args.seed)
+
   model = StableDiffusionV2(**params)
 
   default_weights_url = 'https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors'
@@ -196,24 +127,12 @@ if __name__ == "__main__":
   uc = model.cond_stage_model("")
   del model.cond_stage_model
   print("created conditioning")
-
-  a,b = c.numpy(), np.load("/home/tobi/weights/sd2/c_crossattn.npy")
-  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-  c = Tensor(b)
-  a,b = uc.numpy(), np.load("/home/tobi/weights/sd2/uc_crossattn.npy")
-  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-  uc = Tensor(b)
   
   shape = (N, C, args.height // F, args.width // F)
   randn = Tensor.randn(shape)
-
-  def denoise(model, x, tms, ctx, y):
-    return model.denoise(x, tms, ctx)
-
-  # sampler = DdimSampler(1000, args.guidance)
+  
   sampler = DPMPP2MSampler(args.guidance)
   z = sampler(model.denoise, randn, {"crossattn":c}, {"crossattn":uc}, args.steps)
-  # z = Tensor(np.load("/home/tobi/weights/sd2/samples_z.npy"))
   print("created samples")
   x = model.decode(z, args.height, args.width).realize()
   print("decoded samples")

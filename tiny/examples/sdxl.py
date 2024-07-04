@@ -334,12 +334,6 @@ class DPMPP2MSampler:
 
     old_denoised = None
     for i in trange(num_sigmas - 1):
-      # if i > 0:
-      #   print(f"\nIteration {i}")
-      #   for a,b in [(x,"x"), (sigmas[i-1].reshape(x.shape[0]),"sigma_prev"), (sigmas[i].reshape(x.shape[0]),"sigma"), (sigmas[i+1].reshape(x.shape[0]),"sigma_next")]:
-      #     aa,bb = a.numpy(), np.load(f"/home/tobi/weights/sd2/inputs_{i}/{b}.npy")
-      #     print(f"| {b:<10s} | {np.mean(np.abs(aa-bb)):.4f} | {np.mean(np.abs(aa)):.4f} | {np.mean(np.abs(bb)):.4f} |")
-      # x = Tensor(np.load(f"/home/tobi/weights/sd2/x_{i}.npy"))
       x, old_denoised = self.sampler_step(
         old_denoised=old_denoised,
         prev_sigma=(None if i==0 else sigmas[i-1].reshape(x.shape[0])),
