@@ -1,33 +1,24 @@
-from tinygrad import Tensor
+from tinygrad import Tensor # type: ignore
 
-from extra.models.unet import UNetModel
-from examples.sdv2 import params
-
-from torch.utils.data import default_collate
+from extra.models.unet import UNetModel # type: ignore
+from examples.sdv2 import params, StableDiffusionV2 # type: ignore
 
 if __name__ == "__main__":
   BS = 10
 
-  # def collate_fnx(batch):
-  #   arr = np.array((len(batch),*batch[0]["npy"].shape))
-  #   for i, e in enumerate(batch):
-  #     a = np.frombuffer(e["npy"], dtype=np.float16)
-  #     if i == 0:
-  #     arr[i] = np.frombuffer()
-  #   output = { "latent": Tensor(arr) "txt": [e["txt"] for e in batch] }
-  #   print(type(batch))
-  #   print(len(batch))
-  #   print(type(batch[0]))
-  #   print(batch[0].keys())
-  #   print()
+  def collate_fnx(batch):
+    arr = np.zeros((len(batch),8,64,64), dtype=np.float32)
+    for i, e in enumerate(batch):
+      arr[i,:,:,:] = np.frombuffer(e["npy"], dtype=np.float32, count=131072//4).reshape((8,64,64))
+    return { "latent": Tensor(arr), "txt": [e["txt"].decode() for e in batch] }
 
-  from webdataset import WebDataset, WebLoader
+  from webdataset import WebDataset, WebLoader # type: ignore
   # urls = "/home/tiny/tinygrad/datasets/laion-400m/webdataset-moments-filtered/{00000..00831}.tar"
   urls = "/home/tiny/tinygrad/datasets/laion-400m/webdataset-moments-filtered/{00000..00010}.tar"
   keep_only_keys = { "npy", "txt" }
   def filter_fnx(sample): return {k:v for k,v in sample.items() if k in keep_only_keys}
   dataset = WebDataset(urls=urls, resampled=True, cache_size=-1, cache_dir=None)
-  dataset = dataset.shuffle(size=1000).map(filter_fnx).batched(BS, partial=False, collation_fn=default_collate)
+  dataset = dataset.shuffle(size=1000).map(filter_fnx).batched(BS, partial=False, collation_fn=collate_fnx)
   dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=4, persistent_workers=True)
 
   import numpy as np
@@ -43,5 +34,9 @@ if __name__ == "__main__":
     # if i > 10:
     #   break
   print(entry.keys())
+  print(type(entry["latent"]))
+  print(entry["latent"].shape)
+  # print(type(entry["npy"][0]))
+  # print(len(entry["npy"][0]))
 
   # model = UNetModel(**params["unet_config"])
