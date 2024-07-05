@@ -1,13 +1,31 @@
-from tinygrad import Tensor # type: ignore
+from tinygrad import Tensor, dtypes # type: ignore
+from tinygrad.helpers import fetch
+
 from PIL import Image
+from typing import Dict
 
 from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
 
 from extra.models.unet import UNetModel # type: ignore
-from examples.sdv2 import params, StableDiffusionV2 # type: ignore
+from examples.sdv2 import params, FrozenOpenClipEmbedder # type: ignore
 
 if __name__ == "__main__":
-  BS = 10
+  BS = 2
+  TRAIN_DTYPE = dtypes.float16
+
+
+
+
+  class WrapperModel:
+    def __init__(self, cond_stage_config:Dict, **kwargs):
+      self.cond_stage_model = FrozenOpenClipEmbedder(**cond_stage_config)
+  wrapper = WrapperModel(**params)
+  load_state_dict(wrapper, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"])
+
+  model = UNetModel(**params["unet_config"])
+
+
+
 
   def collate_fnx(batch):
     arr = np.zeros((len(batch),8,64,64), dtype=np.float32)
@@ -27,32 +45,16 @@ if __name__ == "__main__":
   import numpy as np
   for i, entry in enumerate(dataloader):
     break
-    # print(entry["txt"])
-    # latent = np.frombuffer(entry["npy"], dtype=np.float16)
-    # # side = int((latent.shape[0] // 4) ** 0.5)
-    # # assert side * side * 4 == latent.shape[0]
-    # # latent = latent.reshape((side,side,4))
-    # print(latent.shape, latent.shape[0]//4, ((latent.shape[0]//4)**0.5)*8)
-    # print(latent.dtype)
-    # if i > 10:
-    #   break
 
   print(entry.keys())
   print(type(entry["moments"]))
   print(entry["moments"].shape)
-  # print(type(entry["npy"][0]))
-  # print(len(entry["npy"][0]))
 
-  model = StableDiffusionV2(**params)
-  state_dict = torch_load("/raid/weights/512-base-ema.ckpt")["state_dict"]
-  load_state_dict(model, state_dict, strict=False)
-  print("model loaded")
+  def sample_moments(moments:Tensor) -> Tensor:
+    mean, logvar = moments.chunk(2, dim=1)
+    logvar = logvar.clip(-30.0, 20.0)
+    std = Tensor.exp(logvar * 0.5)
+    return mean + std * Tensor.rand(*mean.shape)
 
-  x = entry["moments"][0:1, 0:4] * 0.18215
-  print(x.shape)
-  im = Image.fromarray(model.decode(x, 512, 512).numpy())
-  im.save("/tmp/decoded.png")
-
-  print(entry["txt"])
-
-  # model = UNetModel(**params["unet_config"])
+  x = (sample_moments(entry["moments"]) * 0.18215).cast(TRAIN_DTYPE)
+  c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
