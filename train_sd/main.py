@@ -1,5 +1,5 @@
 from tinygrad import Tensor, dtypes, TinyJit, Device # type: ignore
-from tinygrad.nn.optim import AdamW # type: ignore
+from tinygrad.nn.optim import AdamW, SGD # type: ignore
 
 from typing import Dict, Tuple
 import numpy as np
@@ -11,7 +11,7 @@ from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # t
 
 if __name__ == "__main__":
   BS = 1
-  TRAIN_DTYPE = dtypes.float16
+  TRAIN_DTYPE = dtypes.float32
 
   class WrapperModel:
     def __init__(self, cond_stage_config:Dict, **kwargs):
@@ -24,7 +24,9 @@ if __name__ == "__main__":
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
     w.replace(w.cast(dtypes.float16)).realize()
-  optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, eps=1e-08, weight_decay=0.01)
+  # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
+  # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
+  optimizer = SGD(get_parameters(model), lr=1.25e-7)
 
 
 
@@ -83,6 +85,6 @@ if __name__ == "__main__":
     t = Tensor.randint(x.shape[0], low=0, high=1000)
     print(f"Running Step {i}")
     train_step(*prep_for_jit(x, c, t))
-    if i >= 20:
+    if i >= 25:
       break
 
