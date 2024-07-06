@@ -1,4 +1,4 @@
-from tinygrad import Tensor, Device # type: ignore
+from tinygrad import Tensor, Device, TinyJit # type: ignore
 
 if __name__ == "__main__":
   GPUS = [f'{Device.DEFAULT}:{i}' for i in range(4)]
@@ -26,4 +26,14 @@ if __name__ == "__main__":
     b_t = b.gather(-1, t)
     print(b_t.numpy())
     print(b_t.device)
-  gather_test()
+  # gather_test()
+
+  def jit_shard_test():
+    @TinyJit
+    def run(a, b) -> Tensor:
+      return (a.shard(GPUS, axis=0) + b).realize()
+    for _ in range(8):
+      aa = Tensor.randn(GLOBAL_BS, 4)
+      bb = Tensor.randn(GLOBAL_BS, 4).shard(GPUS, axis=0)
+      print(run(aa.realize(), bb.realize()).numpy())
+  jit_shard_test()

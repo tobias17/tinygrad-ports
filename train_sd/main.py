@@ -11,7 +11,7 @@ import time, os
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict # type: ignore
 
-from extra.models.unet import UNetModel # type: ignore
+from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
 
 if __name__ == "__main__":
@@ -19,8 +19,8 @@ if __name__ == "__main__":
   TRAIN_DTYPE = dtypes.float16
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [2,3,4,5]]
-  DEVICE_BS = 5
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   class WrapperModel:
@@ -40,15 +40,15 @@ if __name__ == "__main__":
 
 
 
-  alphas_cumprod      = get_alphas_cumprod()                  .realize()
-  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1]).realize()
-  sqrt_alphas_cumprod = alphas_cumprod.sqrt()                 .realize()
-  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt().realize()
+  alphas_cumprod      = get_alphas_cumprod()
+  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1])
+  sqrt_alphas_cumprod = alphas_cumprod.sqrt()
+  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
 
-  alphas_cumprod.shard(GPUS, axis=None)
-  alphas_cumprod_prev.shard(GPUS, axis=None)
-  sqrt_alphas_cumprod.shard(GPUS, axis=None)
-  sqrt_on_minus_alphas_cumprod.shard(GPUS, axis=None)
+  alphas_cumprod              .realize()#.shard(GPUS, axis=None)
+  alphas_cumprod_prev         .realize()#.shard(GPUS, axis=None)
+  sqrt_alphas_cumprod         .realize()#.shard(GPUS, axis=None)
+  sqrt_on_minus_alphas_cumprod.realize()#.shard(GPUS, axis=None)
 
 
   def collate_fnx(batch):
@@ -72,18 +72,17 @@ if __name__ == "__main__":
     std = Tensor.exp(logvar * 0.5)
     return mean + std * Tensor.rand(*mean.shape)
 
-  # @TinyJit
-  def train_step(x:Tensor, c:Tensor, t:Tensor) -> float:
+  @TinyJit
+  def train_step(x:Tensor, c:Tensor, t:Tensor, noise:Tensor, t_emb:Tensor) -> float:
     Tensor.training = True
     x = x.shard(GPUS, axis=0)
     c = c.shard(GPUS, axis=0)
     
-    noise   = Tensor.randn(x.shape).shard_(GPUS, axis=0)
-    x_noisy =   sqrt_alphas_cumprod         .gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * x \
-              + sqrt_on_minus_alphas_cumprod.gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * noise
-    output  = model(x_noisy, t, c, shard=GPUS)
+    x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * x \
+              + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * noise
+    output  = model(x_noisy, t_emb.shard(GPUS), c)
 
-    loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean([1, 2, 3]).mean()
+    loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -91,7 +90,7 @@ if __name__ == "__main__":
     return loss.numpy().item()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
-    return tuple(i.cast(TRAIN_DTYPE).realize() for i in inputs)
+    return tuple(i.realize() for i in inputs)
 
   SAVE_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs"))
   if not os.path.exists(SAVE_DIR):
@@ -107,7 +106,10 @@ if __name__ == "__main__":
     x = (sample_moments(entry["moments"]) * 0.18215)
     c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
-    loss = train_step(*prep_for_jit(x, c, t))
+    noise = Tensor.randn(x.shape).shard(GPUS, axis=0)
+    t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
+
+    loss = train_step(*prep_for_jit(x.cast(TRAIN_DTYPE), c.cast(TRAIN_DTYPE), t, noise, t_emb))
     losses.append(loss)
 
     et = time.perf_counter()
