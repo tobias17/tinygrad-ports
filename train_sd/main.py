@@ -18,9 +18,9 @@ if __name__ == "__main__":
 
   TRAIN_DTYPE = dtypes.float16
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 2
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 1
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   class WrapperModel:
@@ -33,7 +33,7 @@ if __name__ == "__main__":
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
-    w.replace(w.cast(dtypes.float16)).realize().to_(GPUS)
+    w.replace(w.cast(dtypes.float16)).realize()#.to_(GPUS)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
   optimizer = SGD(get_parameters(model), lr=1.25e-7)
@@ -75,19 +75,22 @@ if __name__ == "__main__":
   @TinyJit
   def train_step(x:Tensor, c:Tensor, t:Tensor, noise:Tensor, t_emb:Tensor) -> float:
     Tensor.training = True
-    x = x.shard(GPUS, axis=0)
-    c = c.shard(GPUS, axis=0)
+    x = x#.shard(GPUS, axis=0)
+    c = c#.shard(GPUS, axis=0)
     
-    x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * x \
-              + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * noise
-    output  = model(x_noisy, t_emb.shard(GPUS), c)
+    # x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * x \
+    #           + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1).shard(GPUS, axis=0) * noise
+    x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
+              + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
+    # output  = model(x_noisy, t_emb.shard(GPUS), c)
+    output  = model(x_noisy, t_emb, c)
 
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
-    return loss.numpy().item()
+    return loss.realize()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.realize() for i in inputs)
@@ -106,10 +109,11 @@ if __name__ == "__main__":
     x = (sample_moments(entry["moments"]) * 0.18215)
     c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
-    noise = Tensor.randn(x.shape).shard(GPUS, axis=0)
+    noise = Tensor.randn(x.shape)#.shard(GPUS, axis=0)
     t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
 
     loss = train_step(*prep_for_jit(x.cast(TRAIN_DTYPE), c.cast(TRAIN_DTYPE), t, noise, t_emb))
+    loss = loss.numpy().item()
     losses.append(loss)
 
     et = time.perf_counter()
