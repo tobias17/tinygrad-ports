@@ -5,11 +5,25 @@ if __name__ == "__main__":
   DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
-  a = Tensor.randn(GLOBAL_BS, 4).shard(GPUS, axis=0)
+  def initial_test():
+    print("\nINITIAL TEST")
+    a = Tensor.randn(GLOBAL_BS, 4).shard(GPUS, axis=0)
 
-  b = Tensor.arange(1000).sqrt().realize()
-  t = Tensor.randint(GLOBAL_BS, low=0, high=1000)
-  b_t = b[t].reshape(GLOBAL_BS, 1)
+    b = Tensor.arange(1000).sqrt().realize()
+    t = Tensor.randint(GLOBAL_BS, low=0, high=1000)
+    b_t = b[t].reshape(GLOBAL_BS, 1)
 
-  c = b_t.shard(GPUS, axis=0) * a
-  print(c.numpy())
+    c = b_t.shard(GPUS, axis=0) * a
+    print(c.numpy())
+  # initial_test()
+
+  def gather_test():
+    print("\nGATHER TEST")
+    b = Tensor.arange(1000).sqrt().realize().shard(GPUS, axis=None)
+    t = Tensor.randint(GLOBAL_BS, low=0, high=1000).shard(GPUS, axis=0)
+    print(f"b.device: {b.device}")
+    print(f"t.device: {t.device}")
+    b_t = b.gather(-1, t)
+    print(b_t.numpy())
+    print(b_t.device)
+  gather_test()

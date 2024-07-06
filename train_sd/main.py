@@ -18,7 +18,8 @@ if __name__ == "__main__":
 
   TRAIN_DTYPE = dtypes.float16
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [2,3,4,5]]
   DEVICE_BS = 5
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
@@ -39,11 +40,15 @@ if __name__ == "__main__":
 
 
 
-  alphas_cumprod      = get_alphas_cumprod()                  .realize().shard(GPUS, axis=None)
-  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1]).realize().shard(GPUS, axis=None)
-  sqrt_alphas_cumprod = alphas_cumprod.sqrt()                 .realize().shard(GPUS, axis=None)
-  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt().realize().shard(GPUS, axis=None)
+  alphas_cumprod      = get_alphas_cumprod()                  .realize()
+  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1]).realize()
+  sqrt_alphas_cumprod = alphas_cumprod.sqrt()                 .realize()
+  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt().realize()
 
+  alphas_cumprod.shard(GPUS, axis=None)
+  alphas_cumprod_prev.shard(GPUS, axis=None)
+  sqrt_alphas_cumprod.shard(GPUS, axis=None)
+  sqrt_on_minus_alphas_cumprod.shard(GPUS, axis=None)
 
 
   def collate_fnx(batch):
@@ -70,11 +75,13 @@ if __name__ == "__main__":
   # @TinyJit
   def train_step(x:Tensor, c:Tensor, t:Tensor) -> float:
     Tensor.training = True
+    x = x.shard(GPUS, axis=0)
+    c = c.shard(GPUS, axis=0)
     
     noise   = Tensor.randn(x.shape).shard_(GPUS, axis=0)
     x_noisy =   sqrt_alphas_cumprod         .gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * x \
               + sqrt_on_minus_alphas_cumprod.gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * noise
-    output  = model(x_noisy, t, c)
+    output  = model(x_noisy, t, c, shard=GPUS)
 
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean([1, 2, 3]).mean()
     optimizer.zero_grad()
@@ -84,7 +91,7 @@ if __name__ == "__main__":
     return loss.numpy().item()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
-    return tuple(i.cast(TRAIN_DTYPE).realize().shard_(GPUS, axis=0) for i in inputs)
+    return tuple(i.cast(TRAIN_DTYPE).realize() for i in inputs)
 
   SAVE_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs"))
   if not os.path.exists(SAVE_DIR):
