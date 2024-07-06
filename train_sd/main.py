@@ -87,21 +87,23 @@ if __name__ == "__main__":
     std = Tensor.exp(logvar * 0.5)
     return mean + std * Tensor.rand(*mean.shape)
 
-
   # Train Funcs and Utils
 
   @TinyJit
   def train_step(x:Tensor, c:Tensor, x_noisy:Tensor, t_emb:Tensor) -> Tensor:
     Tensor.training = True
     
-    output  = model(x_noisy, t_emb, c)
+    output = model(x_noisy, t_emb, c)
 
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
     optimizer.zero_grad()
     loss.backward()
-    optimizer.step()
+    lt = time.perf_counter()
 
-    return loss.realize()
+    optimizer.step()
+    ot = time.perf_counter()
+
+    return loss.realize(), lt, ot
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
@@ -129,12 +131,15 @@ if __name__ == "__main__":
               + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
     t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
 
-    loss = train_step(*prep_for_jit(x, c, x_noisy, t_emb)).numpy().item()
+    inputs = prep_for_jit(x, c, x_noisy, t_emb)
+    pt = time.perf_counter()
+
+    loss, lt, ot = train_step(*inputs)
+    loss = loss.numpy().item()
     losses.append(loss)
 
     et = time.perf_counter()
-
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:>6.2f} ms run, {loss:>2.5f} train loss")
+    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(lt-pt)*1000.0:6.0f} ms loss, {(ot-lt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
     if i > 0 and i % MEAN_EVERY == 0:
       saved_losses.append(sum(losses) / len(losses))
