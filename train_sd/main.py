@@ -1,5 +1,6 @@
 from tinygrad import Tensor, dtypes, TinyJit, Device # type: ignore
 from tinygrad.nn.optim import AdamW, SGD # type: ignore
+from tinygrad.helpers import getenv # type: ignore
 # from tinygrad.helpers import tqdm
 from tqdm import tqdm # type: ignore
 import matplotlib.pyplot as plt
@@ -14,8 +15,12 @@ from extra.models.unet import UNetModel # type: ignore
 from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
 
 if __name__ == "__main__":
-  BS = 5
+
   TRAIN_DTYPE = dtypes.float16
+
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
+  DEVICE_BS = 5
+  GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   class WrapperModel:
     def __init__(self, cond_stage_config:Dict, **kwargs):
@@ -27,18 +32,17 @@ if __name__ == "__main__":
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
-    w.replace(w.cast(dtypes.float16)).realize()
+    w.replace(w.cast(dtypes.float16)).realize().to_(GPUS)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
   optimizer = SGD(get_parameters(model), lr=1.25e-7)
 
 
 
-  alphas_cumprod      = get_alphas_cumprod()
-  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1])
-  sqrt_alphas_cumprod = alphas_cumprod.sqrt()
-  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
-
+  alphas_cumprod      = get_alphas_cumprod()                  .realize().shard(GPUS, axis=None)
+  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1]).realize().shard(GPUS, axis=None)
+  sqrt_alphas_cumprod = alphas_cumprod.sqrt()                 .realize().shard(GPUS, axis=None)
+  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt().realize().shard(GPUS, axis=None)
 
 
 
@@ -54,7 +58,7 @@ if __name__ == "__main__":
   keep_only_keys = { "npy", "txt" }
   def filter_fnx(sample): return {k:v for k,v in sample.items() if k in keep_only_keys}
   dataset = WebDataset(urls=urls, resampled=True, cache_size=-1, cache_dir=None)
-  dataset = dataset.shuffle(size=1000).decode().map(filter_fnx).batched(BS, partial=False, collation_fn=collate_fnx)
+  dataset = dataset.shuffle(size=1000).decode().map(filter_fnx).batched(GLOBAL_BS, partial=False, collation_fn=collate_fnx)
   dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=4, persistent_workers=True)
 
   def sample_moments(moments:Tensor) -> Tensor:
@@ -67,9 +71,9 @@ if __name__ == "__main__":
   def train_step(x:Tensor, c:Tensor, t:Tensor) -> float:
     Tensor.training = True
     
-    noise   = Tensor.randn(x.shape)
-    x_noisy =   sqrt_alphas_cumprod         .gather(-1, t).reshape(x.shape[0], 1, 1, 1) * x \
-              + sqrt_on_minus_alphas_cumprod.gather(-1, t).reshape(x.shape[0], 1, 1, 1) * noise
+    noise   = Tensor.randn(x.shape).shard_(GPUS, axis=0)
+    x_noisy =   sqrt_alphas_cumprod         .gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * x \
+              + sqrt_on_minus_alphas_cumprod.gather(-1, t).reshape(x.shape[0], 1, 1, 1).shard(GPUS, axis=0) * noise
     output  = model(x_noisy, t, c)
 
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean([1, 2, 3]).mean()
@@ -80,7 +84,7 @@ if __name__ == "__main__":
     return loss.numpy().item()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
-    return tuple(i.cast(TRAIN_DTYPE).realize() for i in inputs)
+    return tuple(i.cast(TRAIN_DTYPE).realize().shard_(GPUS, axis=0) for i in inputs)
 
   SAVE_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs"))
   if not os.path.exists(SAVE_DIR):
