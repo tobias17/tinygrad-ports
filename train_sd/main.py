@@ -14,13 +14,21 @@ from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_s
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
 
+
+# TODO:
+# - Figure out AdamW
+# - Investigate the cond_stage_model
+#   - Use a GPU for pre-processing?
+#   - Use the CPU for this?
+
+
 if __name__ == "__main__":
 
   TRAIN_DTYPE = dtypes.float16
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 1
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   class WrapperModel:
@@ -45,10 +53,10 @@ if __name__ == "__main__":
   sqrt_alphas_cumprod = alphas_cumprod.sqrt()
   sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
 
-  alphas_cumprod              .realize()#.shard(GPUS, axis=None)
-  alphas_cumprod_prev         .realize()#.shard(GPUS, axis=None)
-  sqrt_alphas_cumprod         .realize()#.shard(GPUS, axis=None)
-  sqrt_on_minus_alphas_cumprod.realize()#.shard(GPUS, axis=None)
+  alphas_cumprod              .realize()
+  alphas_cumprod_prev         .realize()
+  sqrt_alphas_cumprod         .realize()
+  sqrt_on_minus_alphas_cumprod.realize()
 
 
   def collate_fnx(batch):
