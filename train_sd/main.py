@@ -1,8 +1,12 @@
 from tinygrad import Tensor, dtypes, TinyJit, Device # type: ignore
 from tinygrad.nn.optim import AdamW, SGD # type: ignore
+# from tinygrad.helpers import tqdm
+from tqdm import tqdm # type: ignore
+import matplotlib.pyplot as plt
 
 from typing import Dict, Tuple
 import numpy as np
+import time, os
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict # type: ignore
 
@@ -10,8 +14,8 @@ from extra.models.unet import UNetModel # type: ignore
 from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
 
 if __name__ == "__main__":
-  BS = 1
-  TRAIN_DTYPE = dtypes.float32
+  BS = 5
+  TRAIN_DTYPE = dtypes.float16
 
   class WrapperModel:
     def __init__(self, cond_stage_config:Dict, **kwargs):
@@ -60,7 +64,7 @@ if __name__ == "__main__":
     return mean + std * Tensor.rand(*mean.shape)
 
   # @TinyJit
-  def train_step(x:Tensor, c:Tensor, t:Tensor) -> None:
+  def train_step(x:Tensor, c:Tensor, t:Tensor) -> float:
     Tensor.training = True
     
     noise   = Tensor.randn(x.shape)
@@ -73,18 +77,35 @@ if __name__ == "__main__":
     loss.backward()
     optimizer.step()
 
-    lv = loss.numpy()
-    print(lv)
+    return loss.numpy().item()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).realize() for i in inputs)
 
+  SAVE_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs"))
+  if not os.path.exists(SAVE_DIR):
+    os.mkdir(SAVE_DIR)
+
+  MAX_ITERATIONS = 5000
+  GRAPH_EVERY = 20
+  losses = []
+
   for i, entry in enumerate(dataloader):
+    st = time.perf_counter()
+
     x = (sample_moments(entry["moments"]) * 0.18215)
     c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
-    print(f"Running Step {i}")
-    train_step(*prep_for_jit(x, c, t))
-    if i >= 25:
-      break
+    loss = train_step(*prep_for_jit(x, c, t))
+    losses.append(loss)
 
+    et = time.perf_counter()
+
+    tqdm.write(f"{i:05d}: {(et-st)*1000.0:>6.2f} ms run, {loss:>2.5f} train loss")
+
+    if i > 0 and i % GRAPH_EVERY == 0:
+      plt.clf()
+      plt.plot(np.arange(len(losses)), losses)
+      plt.savefig(os.path.join(SAVE_DIR, "loss"))
+    if i >= MAX_ITERATIONS:
+      break
