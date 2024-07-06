@@ -10,7 +10,7 @@ import numpy as np
 import time, os, datetime
 import torch
 
-from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict # type: ignore
+from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
@@ -29,15 +29,16 @@ if __name__ == "__main__":
   torch.manual_seed(seed)
 
   __OUTPUT_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
-  def get_output_root() -> str:
-    if not os.path.exists(__OUTPUT_ROOT):
-      os.mkdir(__OUTPUT_ROOT)
-    return __OUTPUT_ROOT
+  def get_output_root(*folders:str) -> str:
+    dirpath = os.path.join(__OUTPUT_ROOT, *folders)
+    if not os.path.exists(dirpath):
+      os.makedirs(dirpath)
+    return dirpath
 
   TRAIN_DTYPE = dtypes.float16
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [2,3,4,5]]
   DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
@@ -98,27 +99,24 @@ if __name__ == "__main__":
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
     optimizer.zero_grad()
     loss.backward()
-    lt = time.perf_counter()
-
     optimizer.step()
-    ot = time.perf_counter()
 
-    return loss.realize(), lt, ot
+    return loss.realize()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
 
-  MAX_ITERATIONS = 50000
-  MEAN_EVERY = 10
+  MAX_ITERS   = 50000
+  MEAN_EVERY  = 10
   GRAPH_EVERY = 100
+  SAVE_EVERY  = 1000
   losses = []
   saved_losses = []
-
 
   # Main Train Loop
 
   for i, entry in enumerate(dataloader):
-    if i >= MAX_ITERATIONS:
+    if i >= MAX_ITERS:
       break
 
     st = time.perf_counter()
@@ -134,12 +132,11 @@ if __name__ == "__main__":
     inputs = prep_for_jit(x, c, x_noisy, t_emb)
     pt = time.perf_counter()
 
-    loss, lt, ot = train_step(*inputs)
-    loss = loss.numpy().item()
+    loss = train_step(*inputs).numpy().item()
     losses.append(loss)
 
     et = time.perf_counter()
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(lt-pt)*1000.0:6.0f} ms loss, {(ot-lt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
+    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
     if i > 0 and i % MEAN_EVERY == 0:
       saved_losses.append(sum(losses) / len(losses))
@@ -147,4 +144,8 @@ if __name__ == "__main__":
     if i > 0 and i % GRAPH_EVERY == 0:
       plt.clf()
       plt.plot(np.arange(len(saved_losses))*MEAN_EVERY, saved_losses)
-      plt.savefig(os.path.join(get_output_root(), "loss"))
+      figure = plt.gcf()
+      figure.set_size_inches(18/1.5, 10/1.5)
+      plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
+    if i > 0 and i % SAVE_EVERY == 0:
+      safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), f"unet_step{i:05d}.safe"))
