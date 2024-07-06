@@ -38,7 +38,7 @@ if __name__ == "__main__":
   TRAIN_DTYPE = dtypes.float16
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [2,3,4,5]]
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
   DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
@@ -108,8 +108,9 @@ if __name__ == "__main__":
 
   MAX_ITERS   = 50000
   MEAN_EVERY  = 10
-  GRAPH_EVERY = 100
+  GRAPH_EVERY = 10
   SAVE_EVERY  = 1000
+  ONLY_LAST   = True
   losses = []
   saved_losses = []
 
@@ -143,9 +144,12 @@ if __name__ == "__main__":
       losses = []
     if i > 0 and i % GRAPH_EVERY == 0:
       plt.clf()
-      plt.plot(np.arange(len(saved_losses))*MEAN_EVERY, saved_losses)
+      plt.plot(np.arange(1,len(saved_losses)+1)*MEAN_EVERY, saved_losses)
+      plt.ylim((0,None))
+      plt.xlabel("step")
+      plt.ylabel("loss")
       figure = plt.gcf()
       figure.set_size_inches(18/1.5, 10/1.5)
       plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
     if i > 0 and i % SAVE_EVERY == 0:
-      safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), f"unet_step{i:05d}.safe"))
+      safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:05d}.safe"))
