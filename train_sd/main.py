@@ -1,13 +1,13 @@
 from tinygrad import Tensor, dtypes # type: ignore
-from tinygrad.helpers import fetch
+from tinygrad.nn.optim import AdamW # type: ignore
 
 from PIL import Image
-from typing import Dict
+from typing import Dict, Tuple
 
 from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
 
 from extra.models.unet import UNetModel # type: ignore
-from examples.sdv2 import params, FrozenOpenClipEmbedder # type: ignore
+from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
 
 if __name__ == "__main__":
   BS = 2
@@ -23,6 +23,14 @@ if __name__ == "__main__":
   load_state_dict(wrapper, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"])
 
   model = UNetModel(**params["unet_config"])
+
+
+
+
+  alphas_cumprod      = get_alphas_cumprod()
+  alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1])
+  sqrt_alphas_cumprod = alphas_cumprod.sqrt()
+  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
 
 
 
@@ -58,3 +66,19 @@ if __name__ == "__main__":
 
   x = (sample_moments(entry["moments"]) * 0.18215).cast(TRAIN_DTYPE)
   c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
+  t = Tensor.randint(x.shape[0], low=0, high=1000)
+
+  def extract_into_tensor(a:Tensor, t:Tensor, x_shape:Tuple[int,...]) -> Tensor:
+    return a.gather(-1, t).reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
+
+  def train_step(x:Tensor, c:Tensor):
+    noise   = Tensor.randn(x.shape)
+    x_noisy = sqrt_alphas_cumprod         .gather(-1, t).reshape(x.shape[0], 1, 1, 1) * x \
+            + sqrt_on_minus_alphas_cumprod.gather(-1, t).reshape(x.shape[0], 1, 1, 1) * noise
+    output  = model(x_noisy, t, c)
+
+    loss = (x - output).square().mean([1, 2, 3]).mean()
+
+
+
+
