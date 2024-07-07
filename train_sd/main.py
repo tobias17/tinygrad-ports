@@ -1,14 +1,13 @@
 from tinygrad import Tensor, dtypes, TinyJit, Device # type: ignore
-from tinygrad.nn.optim import AdamW, SGD # type: ignore
+from tinygrad.nn.optim import AdamW, Adam, SGD # type: ignore
 from tinygrad.helpers import getenv, BEAM # type: ignore
 # from tinygrad.helpers import tqdm
 from tqdm import tqdm # type: ignore
 import matplotlib.pyplot as plt
 
-import time, os, datetime, threading, queue
+import time, os, datetime, math
 from typing import Dict, Tuple
 import numpy as np
-import torch
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
@@ -18,15 +17,13 @@ from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # t
 
 # TODO:
 # - Figure out AdamW
-# - Investigate the cond_stage_model
-#   - Use a GPU for pre-processing?
-#   - Use the CPU for this?
+# - Investigate Async Beam
+# - Inhouse this god-awful webdataset module
 
 
 if __name__ == "__main__":
   seed = 42
   Tensor.manual_seed(seed)
-  torch.manual_seed(seed)
 
   __OUTPUT_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
   def get_output_root(*folders:str) -> str:
@@ -46,7 +43,8 @@ if __name__ == "__main__":
   # DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-
+  EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
+  print(f"Configured to Eval every {EVAL_EVERY} steps")
 
   # Model, Conditioner, Other Variables
 
@@ -63,6 +61,7 @@ if __name__ == "__main__":
     w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
+  # optimizer = Adam(get_parameters(model), lr=1.25e-7 *50)
   optimizer = SGD(get_parameters(model), lr=1.25e-7 *50)
 
   alphas_cumprod      = get_alphas_cumprod()
@@ -91,7 +90,7 @@ if __name__ == "__main__":
   def filter_fnx(sample): return {k:v for k,v in sample.items() if k in keep_only_keys}
   dataset = WebDataset(urls=urls, resampled=True, cache_size=-1, cache_dir=None)
   dataset = dataset.shuffle(size=1000).decode().map(filter_fnx).batched(GLOBAL_BS, partial=False, collation_fn=collate_fnx)
-  dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=4, persistent_workers=True)
+  dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=1, persistent_workers=True)
 
 
   # Train Funcs and Utils
@@ -102,7 +101,7 @@ if __name__ == "__main__":
 
     output = model(x_noisy, t_emb, c)
 
-    loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
+    loss = (x - output).square().mean()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -170,3 +169,6 @@ if __name__ == "__main__":
       plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
     if i > 0 and i % SAVE_EVERY == 0:
       safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:05d}.safe"))
+    
+    if i > 0 and i % EVAL_EVERY == 0:
+      print("Got into eval step, needs to be implemented")
