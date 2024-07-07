@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes, TinyJit, Device # type: ignore
 from tinygrad.nn.optim import AdamW, SGD # type: ignore
-from tinygrad.helpers import getenv # type: ignore
+from tinygrad.helpers import getenv, BEAM # type: ignore
 # from tinygrad.helpers import tqdm
 from tqdm import tqdm # type: ignore
 import matplotlib.pyplot as plt
@@ -126,6 +126,9 @@ if __name__ == "__main__":
   losses = []
   saved_losses = []
 
+  BEAM_VAL = BEAM.value
+  BEAM.value = 0
+
   # Main Train Loop
 
   for i, entry in enumerate(dataloader):
@@ -145,7 +148,9 @@ if __name__ == "__main__":
 
     pt = time.perf_counter()
 
+    BEAM.value = BEAM_VAL
     loss = train_step(*inputs).numpy().item()
+    BEAM.value = 0
     losses.append(loss)
 
     et = time.perf_counter()
