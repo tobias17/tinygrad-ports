@@ -5,9 +5,9 @@ from tinygrad.helpers import getenv # type: ignore
 from tqdm import tqdm # type: ignore
 import matplotlib.pyplot as plt
 
+import time, os, datetime, threading, queue
 from typing import Dict, Tuple
 import numpy as np
-import time, os, datetime
 import torch
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
@@ -38,20 +38,25 @@ if __name__ == "__main__":
   TRAIN_DTYPE = dtypes.float16
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  DEVICE_BS = 2
+
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  # DEVICE_BS = 2
+
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 1
+
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
 
   # Model, Conditioner, Other Variables
 
-  class WrapperModel:
+  class TokenEmbedModel:
     def __init__(self, cond_stage_config:Dict, **kwargs):
       self.cond_stage_model = FrozenOpenClipEmbedder(**cond_stage_config)
-  wrapper = WrapperModel(**params)
-  load_state_dict(wrapper, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"])
-  # for w in get_state_dict(wrapper).values():
-  #   w.to(WRAPPER_DEVICE)
+  token_model = TokenEmbedModel(**params)
+  # for w in get_state_dict(token_model).values():
+  #   w.to_(TOKENIZE_DEVICE)
+  load_state_dict(token_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -103,6 +108,10 @@ if __name__ == "__main__":
 
     return loss.realize()
 
+  @TinyJit
+  def tokenize_step(tokens:Tensor) -> Tensor:
+    return token_model.cond_stage_model.embed_tokens(tokens).realize()
+
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
 
@@ -122,22 +131,28 @@ if __name__ == "__main__":
 
     st = time.perf_counter()
 
+    tokens = Tensor.cat(*[token_model.cond_stage_model.tokenize(t) for t in entry["txt"]]).realize()
+    tt1 = time.perf_counter()
+    # c = token_model.cond_stage_model.embed_tokens(tokens).realize().to(Device.DEFAULT)
+    c = tokenize_step(tokens)
+    tt2 = time.perf_counter()
+
     x = (sample_moments(entry["moments"]) * 0.18215)
-    c = Tensor.cat(*[wrapper.cond_stage_model(t) for t in entry["txt"]], dim=0)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
     noise = Tensor.randn(x.shape)
     x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
               + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
     t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
 
-    inputs = prep_for_jit(x, c, x_noisy, t_emb)
+    # inputs = prep_for_jit(x, c, x_noisy, t_emb)
     pt = time.perf_counter()
 
-    loss = train_step(*inputs).numpy().item()
+    # loss = train_step(*inputs).numpy().item()
+    loss = 0.0
     losses.append(loss)
 
     et = time.perf_counter()
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
+    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(tt1-st)*1000.0:6.0f} ms tokenize, {(tt2-tt1)*1000.0:6.0f} ms token emb, {(pt-tt2)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
     if i > 0 and i % MEAN_EVERY == 0:
       saved_losses.append(sum(losses) / len(losses))
