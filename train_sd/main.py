@@ -39,11 +39,11 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  # DEVICE_BS = 2
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  DEVICE_BS = 2
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 1
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  # DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
@@ -79,6 +79,12 @@ if __name__ == "__main__":
       arr[i,:,:,:] = e["npy"]
     return { "moments": Tensor(arr), "txt": [e["txt"] for e in batch] }
 
+  def sample_moments(moments:Tensor) -> Tensor:
+    mean, logvar = moments.chunk(2, dim=1)
+    logvar = logvar.clip(-30.0, 20.0)
+    std = Tensor.exp(logvar * 0.5)
+    return mean + std * Tensor.rand(*mean.shape)
+
   from webdataset import WebDataset, WebLoader # type: ignore
   urls = "/home/tiny/tinygrad/datasets/laion-400m/webdataset-moments-filtered/{00000..00831}.tar"
   keep_only_keys = { "npy", "txt" }
@@ -87,18 +93,13 @@ if __name__ == "__main__":
   dataset = dataset.shuffle(size=1000).decode().map(filter_fnx).batched(GLOBAL_BS, partial=False, collation_fn=collate_fnx)
   dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=4, persistent_workers=True)
 
-  def sample_moments(moments:Tensor) -> Tensor:
-    mean, logvar = moments.chunk(2, dim=1)
-    logvar = logvar.clip(-30.0, 20.0)
-    std = Tensor.exp(logvar * 0.5)
-    return mean + std * Tensor.rand(*mean.shape)
 
   # Train Funcs and Utils
 
   @TinyJit
-  def train_step(x:Tensor, c:Tensor, x_noisy:Tensor, t_emb:Tensor) -> Tensor:
+  def train_step(x:Tensor, x_noisy:Tensor, t_emb:Tensor, c:Tensor) -> Tensor:
     Tensor.training = True
-    
+
     output = model(x_noisy, t_emb, c)
 
     loss = (x.cast(dtypes.float32) - output.cast(dtypes.float32)).square().mean()
@@ -114,6 +115,8 @@ if __name__ == "__main__":
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
+
+  MAX_QUEUE_SIZE = 10
 
   MAX_ITERS   = 50000
   MEAN_EVERY  = 10
@@ -131,28 +134,22 @@ if __name__ == "__main__":
 
     st = time.perf_counter()
 
-    tokens = Tensor.cat(*[token_model.cond_stage_model.tokenize(t) for t in entry["txt"]]).realize()
-    tt1 = time.perf_counter()
-    # c = token_model.cond_stage_model.embed_tokens(tokens).realize().to(Device.DEFAULT)
-    c = tokenize_step(tokens)
-    tt2 = time.perf_counter()
-
+    c = tokenize_step(Tensor.cat(*[token_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
     x = (sample_moments(entry["moments"]) * 0.18215)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
     noise = Tensor.randn(x.shape)
     x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
               + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
     t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
+    inputs = prep_for_jit(x, x_noisy, t_emb, c)
 
-    # inputs = prep_for_jit(x, c, x_noisy, t_emb)
     pt = time.perf_counter()
 
-    # loss = train_step(*inputs).numpy().item()
-    loss = 0.0
+    loss = train_step(*inputs).numpy().item()
     losses.append(loss)
 
     et = time.perf_counter()
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(tt1-st)*1000.0:6.0f} ms tokenize, {(tt2-tt1)*1000.0:6.0f} ms token emb, {(pt-tt2)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
+    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
     if i > 0 and i % MEAN_EVERY == 0:
       saved_losses.append(sum(losses) / len(losses))
