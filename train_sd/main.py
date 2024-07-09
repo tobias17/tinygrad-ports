@@ -7,13 +7,14 @@ import matplotlib.pyplot as plt
 
 import time, os, datetime, math
 from typing import Dict, Tuple
+from PIL import Image
 import numpy as np
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
-from examples.sdv2 import params, FrozenOpenClipEmbedder, get_alphas_cumprod # type: ignore
-
+from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
+from ddim import DdimSampler
 
 # TODO:
 # - Figure out AdamW
@@ -36,11 +37,11 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  DEVICE_BS = 2
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  # DEVICE_BS = 2
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  # DEVICE_BS = 1
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [5]]
+  DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
@@ -48,13 +49,9 @@ if __name__ == "__main__":
 
   # Model, Conditioner, Other Variables
 
-  class TokenEmbedModel:
-    def __init__(self, cond_stage_config:Dict, **kwargs):
-      self.cond_stage_model = FrozenOpenClipEmbedder(**cond_stage_config)
-  token_model = TokenEmbedModel(**params)
-  # for w in get_state_dict(token_model).values():
-  #   w.to_(TOKENIZE_DEVICE)
-  load_state_dict(token_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
+  wrapper_model = StableDiffusionV2(**params)
+  # del wrapper_model.model
+  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -110,7 +107,7 @@ if __name__ == "__main__":
 
   @TinyJit
   def tokenize_step(tokens:Tensor) -> Tensor:
-    return token_model.cond_stage_model.embed_tokens(tokens).realize()
+    return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
 
   def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
     return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
@@ -128,6 +125,29 @@ if __name__ == "__main__":
   BEAM_VAL = BEAM.value
   BEAM.value = 0
 
+
+
+
+
+
+  ##########################################
+  sampler = DdimSampler()
+  for entry in dataloader:
+    c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    for i in range(c.shape[0]):
+      x = wrapper_model.decode(z, 512, 512)
+      im = Image.fromarray(x[i].numpy())
+      im.save(f"/tmp/rendered_{i}.png")
+    input("next generation? ")
+  ##########################################
+
+
+
+
+
+
   # Main Train Loop
 
   for i, entry in enumerate(dataloader):
@@ -136,7 +156,7 @@ if __name__ == "__main__":
 
     st = time.perf_counter()
 
-    c = tokenize_step(Tensor.cat(*[token_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    c = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
     x = (sample_moments(entry["moments"]) * 0.18215)
     t = Tensor.randint(x.shape[0], low=0, high=1000)
     noise = Tensor.randn(x.shape)
@@ -171,4 +191,4 @@ if __name__ == "__main__":
       safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:05d}.safe"))
     
     if i > 0 and i % EVAL_EVERY == 0:
-      print("Got into eval step, needs to be implemented")
+      pass
