@@ -51,7 +51,8 @@ if __name__ == "__main__":
 
   wrapper_model = StableDiffusionV2(**params)
   # del wrapper_model.model
-  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
+  # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
+  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -140,7 +141,9 @@ if __name__ == "__main__":
       x = wrapper_model.decode(z, 512, 512)
       im = Image.fromarray(x[i].numpy())
       im.save(f"/tmp/rendered_{i}.png")
-    input("next generation? ")
+    resp = input("next generation? ")
+    if resp.strip().lower().startswith("q"):
+      assert False
   ##########################################
 
 
