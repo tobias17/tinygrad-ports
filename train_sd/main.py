@@ -143,9 +143,10 @@ if __name__ == "__main__":
       x = wrapper_model.decode(z, 512, 512)
       im = Image.fromarray(x[i].numpy())
       im.save(f"/tmp/rendered_{i}.png")
-    resp = input("next generation? ")
-    if resp.strip().lower().startswith("q"):
-      assert False
+    break
+    # resp = input("next generation? ")
+    # if resp.strip().lower().startswith("q"):
+    #   assert False
   ##########################################
 
 
@@ -153,47 +154,47 @@ if __name__ == "__main__":
 
 
 
-  # Main Train Loop
+  # # Main Train Loop
 
-  for i, entry in enumerate(dataloader):
-    if i >= MAX_ITERS:
-      break
+  # for i, entry in enumerate(dataloader):
+  #   if i >= MAX_ITERS:
+  #     break
 
-    st = time.perf_counter()
+  #   st = time.perf_counter()
 
-    c = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    x = (sample_moments(entry["moments"]) * 0.18215)
-    t = Tensor.randint(x.shape[0], low=0, high=1000)
-    noise = Tensor.randn(x.shape)
-    x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
-              + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
-    t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
-    inputs = prep_for_jit(x, x_noisy, t_emb, c)
+  #   c = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+  #   x = (sample_moments(entry["moments"]) * 0.18215)
+  #   t = Tensor.randint(x.shape[0], low=0, high=1000)
+  #   noise = Tensor.randn(x.shape)
+  #   x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
+  #             + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
+  #   t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
+  #   inputs = prep_for_jit(x, x_noisy, t_emb, c)
 
-    pt = time.perf_counter()
+  #   pt = time.perf_counter()
 
-    BEAM.value = BEAM_VAL
-    loss = train_step(*inputs).numpy().item()
-    BEAM.value = 0
-    losses.append(loss)
+  #   BEAM.value = BEAM_VAL
+  #   loss = train_step(*inputs).numpy().item()
+  #   BEAM.value = 0
+  #   losses.append(loss)
 
-    et = time.perf_counter()
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
+  #   et = time.perf_counter()
+  #   tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
-    if i > 0 and i % MEAN_EVERY == 0:
-      saved_losses.append(sum(losses) / len(losses))
-      losses = []
-    if i > 0 and i % GRAPH_EVERY == 0:
-      plt.clf()
-      plt.plot(np.arange(1,len(saved_losses)+1)*MEAN_EVERY, saved_losses)
-      plt.ylim((0,None))
-      plt.xlabel("step")
-      plt.ylabel("loss")
-      figure = plt.gcf()
-      figure.set_size_inches(18/1.5, 10/1.5)
-      plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
-    if i > 0 and i % SAVE_EVERY == 0:
-      safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:05d}.safe"))
+  #   if i > 0 and i % MEAN_EVERY == 0:
+  #     saved_losses.append(sum(losses) / len(losses))
+  #     losses = []
+  #   if i > 0 and i % GRAPH_EVERY == 0:
+  #     plt.clf()
+  #     plt.plot(np.arange(1,len(saved_losses)+1)*MEAN_EVERY, saved_losses)
+  #     plt.ylim((0,None))
+  #     plt.xlabel("step")
+  #     plt.ylabel("loss")
+  #     figure = plt.gcf()
+  #     figure.set_size_inches(18/1.5, 10/1.5)
+  #     plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
+  #   if i > 0 and i % SAVE_EVERY == 0:
+  #     safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:05d}.safe"))
     
-    if i > 0 and i % EVAL_EVERY == 0:
-      pass
+  #   if i > 0 and i % EVAL_EVERY == 0:
+  #     pass

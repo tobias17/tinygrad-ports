@@ -46,14 +46,17 @@ class DdimSampler:
       def fp16r(z):
         return z.cast(dtypes.float16).realize()
 
-      latent_uc, latent_c = run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(t_emb,t_emb)), fp16r(Tensor.cat(uc,c))).chunk(2)
-      output = latent_uc + cfg_scale * (latent_c - latent_uc)
+      # latent_uc, latent_c = run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(t_emb,t_emb)), fp16r(Tensor.cat(uc,c))).chunk(2)
+      # output = latent_uc + cfg_scale * (latent_c - latent_uc)
       if i == 9:
         output = Tensor(np.load(f"/home/tiny/weights_cache/ddim/model_output_step_{index}.npy"))
 
       shape = (batch_size, 1, 1, 1)
       e_t =   sqrt_alphas_cumprod          .gather(-1, tms).reshape(shape) * output \
             + sqrt_one_minus_alphas_cumprod.gather(-1, tms).reshape(shape) * x_t
+    
+      a,b = e_t.numpy(),np.load(f"/home/tiny/weights_cache/ddim/e_t_step{index}.npy")
+      print(f"| e_t | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
       a_t               = alphas_cumprod[tms]               .reshape(batch_size,1,1,1)
       a_prev            = alphas_cumprod_prev[tms]          .reshape(batch_size,1,1,1)
@@ -61,6 +64,9 @@ class DdimSampler:
 
       pred_x0 =   sqrt_alphas_cumprod          .gather(-1, tms).reshape(shape) * x_t \
                 - sqrt_one_minus_alphas_cumprod.gather(-1, tms).reshape(shape) * output
+
+      a,b = pred_x0.numpy(),np.load(f"/home/tiny/weights_cache/ddim/pred_x0_step{index}.npy")
+      print(f"| px0 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
       dir_xt = (1.0 - a_prev).sqrt() * e_t
       x_t = a_prev.sqrt() * pred_x0 + dir_xt
