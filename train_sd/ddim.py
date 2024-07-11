@@ -34,7 +34,9 @@ class DdimSampler:
       return model(x,t,c).realize()
 
     for i, step in enumerate(tqdm(time_range)):
-      if i == 8:
+      if i < 9:
+        continue
+      if i == 9:
         x_t = Tensor(np.load(f"/home/tiny/weights_cache/ddim/img_step_{i}.npy"))
 
       index = num_steps - i - 1
@@ -46,6 +48,8 @@ class DdimSampler:
 
       latent_uc, latent_c = run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(t_emb,t_emb)), fp16r(Tensor.cat(uc,c))).chunk(2)
       output = latent_uc + cfg_scale * (latent_c - latent_uc)
+      if i == 9:
+        output = Tensor(np.load(f"/home/tiny/weights_cache/ddim/model_output_step_{index}.npy"))
 
       shape = (batch_size, 1, 1, 1)
       e_t =   sqrt_alphas_cumprod          .gather(-1, tms).reshape(shape) * output \
