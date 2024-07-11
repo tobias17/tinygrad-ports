@@ -27,14 +27,20 @@ class DdimSampler:
     sigmas      = Tensor.zeros_like(alphas)
 
     x_t = Tensor.randn(batch_size, 4, 64, 64)
+    # a = x_t.numpy()
     time_range = np.flip(ddim_timesteps)
 
     @TinyJit
     def run(model, x, t, c):
       return model(x,t,c).realize()
 
+    # x_t = Tensor(np.load(f"/home/tiny/weights_cache/ddim/original_latent.npy"))
+    # b = x_t.numpy()
+    # print(f"| lat | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
     for i, step in enumerate(tqdm(time_range)):
-      x_t = Tensor(np.load(f"/home/tiny/weights_cache/ddim/img_step_{i}.npy"))
+      # if i == 0:
+      #   x_t = Tensor(np.load(f"/home/tiny/weights_cache/ddim/img_step_{i}.npy"))
       print(f"ITER {i}")
 
       index = num_steps - i - 1
@@ -49,7 +55,7 @@ class DdimSampler:
 
       a,b = output.numpy(), np.load(f"/home/tiny/weights_cache/ddim/model_output_step_{index}.npy")
       print(f"| out | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-      output = Tensor(b)
+      # output = Tensor(b)
 
       shape = (batch_size, 1, 1, 1)
       e_t =   sqrt_alphas_cumprod          .gather(-1, tms).reshape(shape) * output \
@@ -80,6 +86,6 @@ class DdimSampler:
       a,b = x_t.numpy(),np.load(f"/home/tiny/weights_cache/ddim/x_prev_step{index}.npy")
       print(f"| x_t | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
-    x_t = Tensor(np.load("/home/tiny/weights_cache/ddim/out.npy"))
+    # x_t = Tensor(np.load("/home/tiny/weights_cache/ddim/out.npy"))
 
     return x_t
