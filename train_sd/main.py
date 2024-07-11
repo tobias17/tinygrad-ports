@@ -134,8 +134,10 @@ if __name__ == "__main__":
   ##########################################
   sampler = DdimSampler()
   for entry in dataloader:
-    c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
+    uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
     z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
     for i in range(c.shape[0]):
       x = wrapper_model.decode(z, 512, 512)

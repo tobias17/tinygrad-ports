@@ -34,6 +34,9 @@ class DdimSampler:
       return model(x,t,c).realize()
 
     for i, step in enumerate(tqdm(time_range)):
+      if i == 8:
+        x_t = Tensor(np.load(f"/home/tiny/weights_cache/ddim/img_step_{i}.npy"))
+
       index = num_steps - i - 1
       tms = Tensor.full((batch_size,), int(step))
       t_emb = timestep_embedding(tms, 320)
@@ -57,5 +60,7 @@ class DdimSampler:
 
       dir_xt = (1.0 - a_prev).sqrt() * e_t
       x_t = a_prev.sqrt() * pred_x0 + dir_xt
+
+    # x_t = Tensor(np.load("/home/tiny/weights_cache/ddim/out.npy"))
 
     return x_t
