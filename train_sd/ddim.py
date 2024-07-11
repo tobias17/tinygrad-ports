@@ -69,8 +69,15 @@ class DdimSampler:
       print(f"| px0 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
 
       dir_xt = (1.0 - a_prev).sqrt() * e_t
+
+      a,b = dir_xt.numpy(),np.load(f"/home/tiny/weights_cache/ddim/dir_xt_step{index}.npy")
+      print(f"| dir | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
       x_t = a_prev.sqrt() * pred_x0 + dir_xt
 
-    # x_t = Tensor(np.load("/home/tiny/weights_cache/ddim/out.npy"))
+      a,b = x_t.numpy(),np.load(f"/home/tiny/weights_cache/ddim/x_prev_step{index}.npy")
+      print(f"| x_t | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
+    x_t = Tensor(np.load("/home/tiny/weights_cache/ddim/out.npy"))
 
     return x_t
