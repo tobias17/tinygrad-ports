@@ -15,6 +15,7 @@ from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_s
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
+from inception import InceptionV3
 
 # TODO:
 # - Figure out AdamW
@@ -133,6 +134,8 @@ if __name__ == "__main__":
 
   ##########################################
   sampler = DdimSampler()
+  inception = InceptionV3()
+
   for entry in dataloader:
     # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
     # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
@@ -140,9 +143,11 @@ if __name__ == "__main__":
     uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
     z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
     for i in range(c.shape[0]):
-      x = wrapper_model.decode(z, 512, 512)
-      im = Image.fromarray(x[i].numpy())
+      x = wrapper_model.decode(z[i])
+      im = Image.fromarray(x.numpy())
       im.save(f"/tmp/rendered_{i}.png")
+    
+
     break
     # resp = input("next generation? ")
     # if resp.strip().lower().startswith("q"):
