@@ -6,9 +6,10 @@ from torch.nn import functional as F
 
 def bilinear_interp(x:Tensor, out_size=(299,299), align_corners=False) -> Tensor:
   inp_size = x.shape[-2:]
-  align_amount = 0.0 if align_corners else 0.5
   for i in range(-len(out_size),0):
-    index: Tensor = (Tensor.arange(out_size[i]).cast(dtypes.float32) + align_amount) / (out_size[i] - 1 + 2*align_amount) * (inp_size[i] - 1 + 2*align_amount)
+    scale = (inp_size[i] - (1 if align_corners else 0)) / (out_size[i] - (1 if align_corners else 0))
+    index = Tensor.arange(out_size[i]).cast(dtypes.float32)
+    index = scale * index if align_corners else (scale * (index + 0.5)) - 0.5
     _, high, perc = (low := index.floor()), index.ceil(), index - low
     np.set_printoptions(suppress=True,precision=3)
     print(low.numpy())
