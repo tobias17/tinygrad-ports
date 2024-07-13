@@ -53,7 +53,7 @@ if __name__ == "__main__":
   wrapper_model = StableDiffusionV2(**params)
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
-  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
+  # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -137,15 +137,19 @@ if __name__ == "__main__":
   inception = InceptionV3()
 
   for entry in dataloader:
-    # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
-    uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
-    for i in range(c.shape[0]):
-      x = wrapper_model.decode(z[i])
-      im = Image.fromarray(x.numpy())
-      im.save(f"/tmp/rendered_{i}.png")
+    # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    # # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    # c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
+    # uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
+    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+
+    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    # x = wrapper_model.first_stage_model.decoder(x)
+    # x = (x + 1.0) / 2.0
+    
+    x = Tensor.randn(1,3,512,512)
+
+    out = inception(x)
     
 
     break

@@ -1,8 +1,9 @@
 from tinygrad import Tensor # type: ignore
 from tinygrad.nn import Conv2d, BatchNorm2d, Linear # type: ignore
-from tinygrad.nn.state import load_state_dict # type: ignore
+from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from functools import lru_cache
+from interpolation import bilinear_interp
 
 from typing import Optional, Dict
 
@@ -22,8 +23,8 @@ class InceptionA:
     self.branch5x5_2 = BasicConv2d(48, 64, kernel_size=5, padding=2)
 
     self.branch3x3dbl_1 = BasicConv2d(in_ch, 64, kernel_size=1)
-    self.branch3x3dbl_2 = BasicConv2d(64, 96, kernel_size=3, padding=1)
-    self.branch3x3dbl_3 = BasicConv2d(96, 96, kernel_size=3, padding=1)
+    self.branch3x3dbl_2 = BasicConv2d(64, 96, kernel_size=(3,3), padding=1)
+    self.branch3x3dbl_3 = BasicConv2d(96, 96, kernel_size=(3,3), padding=1)
 
     self.branch_pool = BasicConv2d(in_ch, pool_feat, kernel_size=1)
 
@@ -32,23 +33,23 @@ class InceptionA:
       self.branch1x1(x),
       x.sequential([self.branch5x5_1, self.branch5x5_2]),
       x.sequential([self.branch3x3dbl_1, self.branch3x3dbl_2, self.branch3x3dbl_3]),
-      self.branch_pool(x.avg_pool2d(kernel_size=3, stride=1, dilation=1)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
 class InceptionB:
   def __init__(self, in_ch:int):
-    self.branch3x3 = BasicConv2d(in_ch, 384, kernel_size=3, stride=2)
+    self.branch3x3 = BasicConv2d(in_ch, 384, kernel_size=(3,3), stride=2)
 
     self.branch3x3dbl_1 = BasicConv2d(in_ch, 64, kernel_size=1)
-    self.branch3x3dbl_2 = BasicConv2d(64, 96, kernel_size=3, padding=1)
-    self.branch3x3dbl_3 = BasicConv2d(96, 96, kernel_size=3, stride=2)
+    self.branch3x3dbl_2 = BasicConv2d(64, 96, kernel_size=(3,3), padding=1)
+    self.branch3x3dbl_3 = BasicConv2d(96, 96, kernel_size=(3,3), stride=2)
   
   def __call__(self, x:Tensor) -> Tensor:
     outputs = [
       self.branch3x3(x),
       x.sequential([self.branch3x3dbl_1, self.branch3x3dbl_2, self.branch3x3dbl_3]),
-      x.max_pool2d(kernel_size=3, stride=2),
+      x.max_pool2d(kernel_size=(3,3), stride=2, dilation=1),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -73,25 +74,25 @@ class InceptionC:
       self.branch1x1(x),
       x.sequential([self.branch7x7_1, self.branch7x7_2, self.branch7x7_3]),
       x.sequential([self.branch7x7dbl_1, self.branch7x7dbl_2, self.branch7x7dbl_3, self.branch7x7dbl_4, self.branch7x7dbl_5]),
-      self.branch_pool(x.avg_pool2d(x, kernel_size=3, stride=1, dilation=1)),
+      self.branch_pool(x.avg_pool2d(x, kernel_size=(3,3), stride=1, dilation=0)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
 class InceptionD:
   def __init__(self, in_ch:int):
     self.branch3x3_1 = BasicConv2d(in_ch, 192, kernel_size=1)
-    self.branch3x3_2 = BasicConv2d(192, 320, kernel_size=3, stride=2)
+    self.branch3x3_2 = BasicConv2d(192, 320, kernel_size=(3,3), stride=2)
 
     self.branch7x7x3_1 = BasicConv2d(in_ch, 192, kernel_size=1)
     self.branch7x7x3_2 = BasicConv2d(192, 192, kernel_size=(1, 7), padding=(0, 3))
     self.branch7x7x3_3 = BasicConv2d(192, 192, kernel_size=(7, 1), padding=(3, 0))
-    self.branch7x7x3_4 = BasicConv2d(192, 192, kernel_size=3, stride=2)
+    self.branch7x7x3_4 = BasicConv2d(192, 192, kernel_size=(3,3), stride=2)
 
   def __call__(self, x:Tensor) -> Tensor:
     outputs = [
       x.sequential([self.branch3x3_1, self.branch3x3_2]),
       x.sequential([self.branch7x7x3_1, self.branch7x7x3_2, self.branch7x7x3_3, self.branch7x7x3_4]),
-      x.max_pool2d(kernel_size=3, stride=2),
+      x.max_pool2d(kernel_size=(3,3), stride=2, dilation=1),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -104,7 +105,7 @@ class InceptionE:
     self.branch3x3_2b = BasicConv2d(384, 384, kernel_size=(3, 1), padding=(1, 0))
 
     self.branch3x3dbl_1 = BasicConv2d(in_ch, 448, kernel_size=1)
-    self.branch3x3dbl_2 = BasicConv2d(448, 384, kernel_size=3, padding=1)
+    self.branch3x3dbl_2 = BasicConv2d(448, 384, kernel_size=(3,3), padding=1)
     self.branch3x3dbl_3a = BasicConv2d(384, 384, kernel_size=(1, 3), padding=(0, 1))
     self.branch3x3dbl_3b = BasicConv2d(384, 384, kernel_size=(3, 1), padding=(1, 0))
 
@@ -117,7 +118,7 @@ class InceptionE:
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.avg_pool2d(kernel_size=3, stride=1, dilation=1)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -130,36 +131,35 @@ class InceptionAux:
     # self.fc.stddev = 0.001
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = x.avg_pool2d(kernel_size=5, stride=3).sequential([self.conv0, self.conv1])
-    x = x.avg_pool2d(kernel_size=1).reshape(x.shape[0],-1)
+    x = x.avg_pool2d(kernel_size=5, stride=3, dilation=0).sequential([self.conv0, self.conv1])
+    x = x.avg_pool2d(kernel_size=1, dilation=0).reshape(x.shape[0],-1)
     return self.fc(x)
 
 class Inception3:
-  def __init__(self, num_classes:int=1000, aux_logits:bool=False, cls_map:Optional[Dict]=None):
+  def __init__(self, num_classes:int=1008, cls_map:Optional[Dict]=None):
     def get_cls(key1:str,key2:str,default):
       return default if cls_map is None else cls_map.get(key1, cls_map.get(key2,default))
 
-    self.aux_logits = aux_logits
     self.transform_input = False
-    self.Conv2d_1a_3x3 = BasicConv2d(3, 32, kernel_size=3, stride=2)
-    self.Conv2d_2a_3x3 = BasicConv2d(32, 32, kernel_size=3)
-    self.Conv2d_2b_3x3 = BasicConv2d(32, 64, kernel_size=3, padding=1)
-    self.maxpool1 = lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2)
+    self.Conv2d_1a_3x3 = BasicConv2d(3, 32, kernel_size=(3,3), stride=2)
+    self.Conv2d_2a_3x3 = BasicConv2d(32, 32, kernel_size=(3,3))
+    self.Conv2d_2b_3x3 = BasicConv2d(32, 64, kernel_size=(3,3), padding=1)
+    self.maxpool1 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=0)
     self.Conv2d_3b_1x1 = BasicConv2d(64, 80, kernel_size=1)
-    self.Conv2d_4a_3x3 = BasicConv2d(80, 192, kernel_size=3)
-    self.maxpool2 = lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2)
-    self.Mixed_5b = get_cls("A1","A",InceptionA)(192, pool_features=32)
-    self.Mixed_5c = get_cls("A2","A",InceptionA)(256, pool_features=64)
-    self.Mixed_5d = get_cls("A3","A",InceptionA)(288, pool_features=64)
+    self.Conv2d_4a_3x3 = BasicConv2d(80, 192, kernel_size=(3,3))
+    self.maxpool2 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=0)
+    self.Mixed_5b = get_cls("A1","A",InceptionA)(192, pool_feat=32)
+    self.Mixed_5c = get_cls("A2","A",InceptionA)(256, pool_feat=64)
+    self.Mixed_5d = get_cls("A3","A",InceptionA)(288, pool_feat=64)
     self.Mixed_6a = get_cls("B1","B",InceptionB)(288)
-    self.Mixed_6b = get_cls("C1","C",InceptionC)(768, channels_7x7=128)
-    self.Mixed_6c = get_cls("C2","C",InceptionC)(768, channels_7x7=160)
-    self.Mixed_6d = get_cls("C3","C",InceptionC)(768, channels_7x7=160)
-    self.Mixed_6e = get_cls("C4","C",InceptionC)(768, channels_7x7=192)
+    self.Mixed_6b = get_cls("C1","C",InceptionC)(768, ch_7x7=128)
+    self.Mixed_6c = get_cls("C2","C",InceptionC)(768, ch_7x7=160)
+    self.Mixed_6d = get_cls("C3","C",InceptionC)(768, ch_7x7=160)
+    self.Mixed_6e = get_cls("C4","C",InceptionC)(768, ch_7x7=192)
     self.Mixed_7a = get_cls("D1","D",InceptionD)(768)
     self.Mixed_7b = get_cls("E1","E",InceptionE)(1280)
     self.Mixed_7c = get_cls("E2","E",InceptionE)(2048)
-    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
+    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
     self.dropout = 0.0
     self.fc = Linear(2048, num_classes)
 
@@ -196,7 +196,7 @@ class FidInceptionA(InceptionA):
       self.branch1x1(x),
       x.sequential([self.branch5x5_1, self.branch5x5_2]),
       x.sequential([self.branch3x3dbl_1, self.branch3x3dbl_2, self.branch3x3dbl_3]),
-      self.branch_pool(x.avg_pool2d(kernel_size=3, stride=1, dilation=1, count_include_dilate=False))
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False))
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -206,7 +206,7 @@ class FidInceptionC(InceptionC):
       self.branch1x1(x),
       x.sequential([self.branch7x7_1, self.branch7x7_2, self.branch7x7_3]),
       x.sequential([self.branch7x7dbl_1, self.branch7x7dbl_2, self.branch7x7dbl_3, self.branch7x7dbl_4, self.branch7x7dbl_5]),
-      self.branch_pool(x.avg_pool2d(kernel_size=3, stride=1, padding=1, count_include_dilate=False))
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False))
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -218,7 +218,7 @@ class FidInceptionE1(InceptionE):
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.avg_pool2d(kernel_size=3, stride=1, dilation=1, count_include_dilate=False)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -230,13 +230,13 @@ class FidInceptionE2(InceptionE):
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.max_pool2d(kernel_size=3, stride=1, dilation=1)),
+      self.branch_pool(x.max_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
 @lru_cache()
 def default_fid():
-  return fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth")
+  return torch_load(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth"))
 
 def fid_inception_v3():
   model = Inception3(cls_map={
@@ -245,7 +245,11 @@ def fid_inception_v3():
     "E1": FidInceptionE1,
     "E2": FidInceptionE2,
   })
-  load_state_dict(model, default_fid())
+  state_dict = default_fid()
+  for k,v in state_dict.items():
+    if k.endswith(".num_batches_tracked"):
+      state_dict[k] = v.reshape(1)
+  load_state_dict(model, state_dict)
   return model
 
 class InceptionV3:
@@ -254,31 +258,31 @@ class InceptionV3:
     inception = fid_inception_v3()
 
     self.blocks = [
-      [
-        inception.Conv2d_1a_3x3,
-        inception.Conv2d_2a_3x3,
-        inception.Conv2d_2b_3x3,
-        lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2),
+      inception.Conv2d_1a_3x3,
+      inception.Conv2d_2a_3x3,
+      inception.Conv2d_2b_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
 
-        inception.Conv2d_3b_1x1,
-        inception.Conv2d_4a_3x3,
-        lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2),
+      inception.Conv2d_3b_1x1,
+      inception.Conv2d_4a_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
 
-        inception.Mixed_5b,
-        inception.Mixed_5c,
-        inception.Mixed_5d,
-        inception.Mixed_6a,
-        inception.Mixed_6b,
-        inception.Mixed_6c,
-        inception.Mixed_6d,
-        inception.Mixed_6e,
+      inception.Mixed_5b,
+      inception.Mixed_5c,
+      inception.Mixed_5d,
+      inception.Mixed_6a,
+      inception.Mixed_6b,
+      inception.Mixed_6c,
+      inception.Mixed_6d,
+      inception.Mixed_6e,
 
-        inception.Mixed_7a,
-        inception.Mixed_7b,
-        inception.Mixed_7c,
-        lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
-      ],
+      inception.Mixed_7a,
+      inception.Mixed_7b,
+      inception.Mixed_7c,
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0),
     ]
 
   def __call__(self, x:Tensor) -> Tensor:
-    pass
+    x = bilinear_interp(x)
+    x = (x * 2) - 1
+    return x.sequential(self.blocks)

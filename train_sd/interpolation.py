@@ -11,10 +11,10 @@ def bilinear_interp(x:Tensor, out_size=(299,299), align_corners=False) -> Tensor
     index = Tensor.arange(out_size[i]).cast(dtypes.float32)
     index = scale * index if align_corners else (scale * (index + 0.5)) - 0.5
     _, high, perc = (low := index.floor()), index.ceil(), index - low
-    np.set_printoptions(suppress=True,precision=3)
-    print(low.numpy())
-    print(high.numpy())
-    print(perc.numpy())
+    # np.set_printoptions(suppress=True,precision=3)
+    # print(low.numpy())
+    # print(high.numpy())
+    # print(perc.numpy())
     resh_shape, exp_shape = [1,]*len(x.shape), list(x.shape)
     resh_shape[i] = out_size[i]
     exp_shape[i]  = out_size[i]
