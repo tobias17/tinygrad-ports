@@ -159,7 +159,7 @@ class Inception3:
     self.Mixed_7a = get_cls("D1","D",InceptionD)(768)
     self.Mixed_7b = get_cls("E1","E",InceptionE)(1280)
     self.Mixed_7c = get_cls("E2","E",InceptionE)(2048)
-    self.avgpool = AdaptiveAvgPool2d((1, 1))
+    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
     self.dropout = 0.0
     self.fc = Linear(2048, num_classes)
 
@@ -251,6 +251,34 @@ def fid_inception_v3():
 class InceptionV3:
   def __init__(self):
     self.output_blocks = [2048]
+    inception = fid_inception_v3()
+
     self.blocks = [
-      []
+      [
+        inception.Conv2d_1a_3x3,
+        inception.Conv2d_2a_3x3,
+        inception.Conv2d_2b_3x3,
+        lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2),
+
+        inception.Conv2d_3b_1x1,
+        inception.Conv2d_4a_3x3,
+        lambda x: Tensor.max_pool2d(x, kernel_size=3, stride=2),
+
+        inception.Mixed_5b,
+        inception.Mixed_5c,
+        inception.Mixed_5d,
+        inception.Mixed_6a,
+        inception.Mixed_6b,
+        inception.Mixed_6c,
+        inception.Mixed_6d,
+        inception.Mixed_6e,
+
+        inception.Mixed_7a,
+        inception.Mixed_7b,
+        inception.Mixed_7c,
+        lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
+      ],
     ]
+
+  def __call__(self, x:Tensor) -> Tensor:
+    pass
