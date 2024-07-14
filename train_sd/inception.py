@@ -33,7 +33,7 @@ class InceptionA:
       self.branch1x1(x),
       x.sequential([self.branch5x5_1, self.branch5x5_2]),
       x.sequential([self.branch3x3dbl_1, self.branch3x3dbl_2, self.branch3x3dbl_3]),
-      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -74,7 +74,7 @@ class InceptionC:
       self.branch1x1(x),
       x.sequential([self.branch7x7_1, self.branch7x7_2, self.branch7x7_3]),
       x.sequential([self.branch7x7dbl_1, self.branch7x7dbl_2, self.branch7x7dbl_3, self.branch7x7dbl_4, self.branch7x7dbl_5]),
-      self.branch_pool(x.avg_pool2d(x, kernel_size=(3,3), stride=1, dilation=0)),
+      self.branch_pool(x.avg_pool2d(x, kernel_size=(3,3), stride=1, padding=1)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -118,7 +118,7 @@ class InceptionE:
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -131,8 +131,8 @@ class InceptionAux:
     # self.fc.stddev = 0.001
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = x.avg_pool2d(kernel_size=5, stride=3, dilation=0).sequential([self.conv0, self.conv1])
-    x = x.avg_pool2d(kernel_size=1, dilation=0).reshape(x.shape[0],-1)
+    x = x.avg_pool2d(kernel_size=5, stride=3, padding=1).sequential([self.conv0, self.conv1])
+    x = x.avg_pool2d(kernel_size=1, padding=1).reshape(x.shape[0],-1)
     return self.fc(x)
 
 class Inception3:
@@ -144,10 +144,10 @@ class Inception3:
     self.Conv2d_1a_3x3 = BasicConv2d(3, 32, kernel_size=(3,3), stride=2)
     self.Conv2d_2a_3x3 = BasicConv2d(32, 32, kernel_size=(3,3))
     self.Conv2d_2b_3x3 = BasicConv2d(32, 64, kernel_size=(3,3), padding=1)
-    self.maxpool1 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=0)
+    self.maxpool1 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, padding=1)
     self.Conv2d_3b_1x1 = BasicConv2d(64, 80, kernel_size=1)
     self.Conv2d_4a_3x3 = BasicConv2d(80, 192, kernel_size=(3,3))
-    self.maxpool2 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=0)
+    self.maxpool2 = lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, padding=1)
     self.Mixed_5b = get_cls("A1","A",InceptionA)(192, pool_feat=32)
     self.Mixed_5c = get_cls("A2","A",InceptionA)(256, pool_feat=64)
     self.Mixed_5d = get_cls("A3","A",InceptionA)(288, pool_feat=64)
@@ -159,7 +159,7 @@ class Inception3:
     self.Mixed_7a = get_cls("D1","D",InceptionD)(768)
     self.Mixed_7b = get_cls("E1","E",InceptionE)(1280)
     self.Mixed_7c = get_cls("E2","E",InceptionE)(2048)
-    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
+    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), padding=1) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
     self.dropout = 0.0
     self.fc = Linear(2048, num_classes)
 
@@ -196,7 +196,7 @@ class FidInceptionA(InceptionA):
       self.branch1x1(x),
       x.sequential([self.branch5x5_1, self.branch5x5_2]),
       x.sequential([self.branch3x3dbl_1, self.branch3x3dbl_2, self.branch3x3dbl_3]),
-      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False))
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1, count_include_pad=False))
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -206,7 +206,7 @@ class FidInceptionC(InceptionC):
       self.branch1x1(x),
       x.sequential([self.branch7x7_1, self.branch7x7_2, self.branch7x7_3]),
       x.sequential([self.branch7x7dbl_1, self.branch7x7dbl_2, self.branch7x7dbl_3, self.branch7x7dbl_4, self.branch7x7dbl_5]),
-      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False))
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1, count_include_pad=False))
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -218,7 +218,7 @@ class FidInceptionE1(InceptionE):
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, dilation=0, count_include_dilate=False)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1, count_include_pad=False)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -230,7 +230,7 @@ class FidInceptionE2(InceptionE):
       self.branch1x1(x),
       Tensor.cat(self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3), dim=1),
       Tensor.cat(self.branch3x3dbl_3a(branch3x3dbl), self.branch3x3dbl_3b(branch3x3dbl), dim=1),
-      self.branch_pool(x.max_pool2d(kernel_size=(3,3), stride=1, dilation=0)),
+      self.branch_pool(x.max_pool2d(kernel_size=(3,3), stride=1, padding=1)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -278,7 +278,7 @@ class InceptionV3:
       inception.Mixed_7a,
       inception.Mixed_7b,
       inception.Mixed_7c,
-      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0),
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), padding=1),
     ]
 
   def __call__(self, x:Tensor) -> Tensor:
@@ -325,7 +325,7 @@ class InceptionV3:
       self.inception.Mixed_7a,
       self.inception.Mixed_7b,
       self.inception.Mixed_7c,
-      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0),
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
     ])
 
     return x
