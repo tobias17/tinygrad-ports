@@ -254,6 +254,8 @@ class InceptionV3:
         state_dict[k] = v.reshape(1)
     load_state_dict(inception, state_dict)
 
+    self.inception = inception
+
     self.blocks = [
       inception.Conv2d_1a_3x3,
       inception.Conv2d_2a_3x3,
@@ -282,7 +284,53 @@ class InceptionV3:
   def __call__(self, x:Tensor) -> Tensor:
     x = bilinear_interp(x)
     x = (x * 2) - 1
-    return x.sequential(self.blocks)
+
+    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_0.npy")
+    print(f"| 0 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    x = Tensor(b)
+    x = x.sequential([
+      self.inception.Conv2d_1a_3x3,
+      self.inception.Conv2d_2a_3x3,
+      self.inception.Conv2d_2b_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
+    ])
+
+    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_1.npy")
+    print(f"| 1 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    x = Tensor(b)
+    x = x.sequential([
+      self.inception.Conv2d_3b_1x1,
+      self.inception.Conv2d_4a_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
+    ])
+
+    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_2.npy")
+    print(f"| 2 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    x = Tensor(b)
+    x = x.sequential([
+      self.inception.Mixed_5b,
+      self.inception.Mixed_5c,
+      self.inception.Mixed_5d,
+      self.inception.Mixed_6a,
+      self.inception.Mixed_6b,
+      self.inception.Mixed_6c,
+      self.inception.Mixed_6d,
+      self.inception.Mixed_6e,
+    ])
+
+    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_3.npy")
+    print(f"| 3 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    x = Tensor(b)
+    x = x.sequential([
+      self.inception.Mixed_7a,
+      self.inception.Mixed_7b,
+      self.inception.Mixed_7c,
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), dilation=0),
+    ])
+
+    return x
+
+    # return x.sequential(self.blocks)
 
 if __name__ == "__main__":
   model = InceptionV3()
@@ -291,7 +339,6 @@ if __name__ == "__main__":
   x = Tensor(np.load("/home/tiny/weights_cache/inception/input_x.npy")).permute(2, 0, 1).unsqueeze(0)
 
   z = model(x)
-  print(z.shape)
 
   a,b = z.numpy(),np.load("/home/tiny/weights_cache/inception/output_z.npy")
-  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+  print(f"| z | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
