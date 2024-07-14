@@ -238,24 +238,21 @@ class FidInceptionE2(InceptionE):
 def default_fid():
   return torch_load(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth"))
 
-def fid_inception_v3():
-  model = Inception3(cls_map={
-    "A":  FidInceptionA,
-    "C":  FidInceptionC,
-    "E1": FidInceptionE1,
-    "E2": FidInceptionE2,
-  })
-  state_dict = default_fid()
-  for k,v in state_dict.items():
-    if k.endswith(".num_batches_tracked"):
-      state_dict[k] = v.reshape(1)
-  load_state_dict(model, state_dict)
-  return model
-
 class InceptionV3:
   def __init__(self):
     self.output_blocks = [2048]
-    inception = fid_inception_v3()
+
+    inception = Inception3(cls_map={
+      "A":  FidInceptionA,
+      "C":  FidInceptionC,
+      "E1": FidInceptionE1,
+      "E2": FidInceptionE2,
+    })
+    state_dict = default_fid()
+    for k,v in state_dict.items():
+      if k.endswith(".num_batches_tracked"):
+        state_dict[k] = v.reshape(1)
+    load_state_dict(inception, state_dict)
 
     self.blocks = [
       inception.Conv2d_1a_3x3,
@@ -286,3 +283,15 @@ class InceptionV3:
     x = bilinear_interp(x)
     x = (x * 2) - 1
     return x.sequential(self.blocks)
+
+if __name__ == "__main__":
+  model = InceptionV3()
+
+  import numpy as np
+  x = Tensor(np.load("/home/tiny/weights_cache/inception/input_x.npy")).permute(2, 0, 1).unsqueeze(0)
+
+  z = model(x)
+  print(z.shape)
+
+  a,b = z.numpy(),np.load("/home/tiny/weights_cache/inception/output_z.npy")
+  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
