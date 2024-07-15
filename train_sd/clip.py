@@ -2,7 +2,7 @@ from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from tinygrad.nn import Linear, LayerNorm, Embedding # type: ignore
 
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Union, Tuple, Dict
 from abc import ABC, abstractmethod
 from functools import lru_cache
 import re, gzip
@@ -301,12 +301,7 @@ class Open:
       self.transformer = Open.ClipTransformer(dims, layers, n_heads)
       self.ln_final = LayerNorm(dims)
       self.text_projection = Tensor.empty(dims, dims)
-
-    @property
-    def attn_mask(self) -> Tensor:
-      if not hasattr(self, "_attn_mask"):
-        self._attn_mask = Tensor.full((77, 77), float("-inf")).triu(1)
-      return self._attn_mask
+      self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
 
     def __call__(self, text:Tensor) -> Tensor:
       seq_len = text.shape[1]
@@ -319,13 +314,34 @@ class Open:
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
 
+configs = {
+  "ViT-H-14": {
+    "dims": 1024,
+    "vision_cfg": {
+      "image_size": 224,
+      "layers": 32,
+      "width": 1280,
+      "d_head": 80,
+      "patch_size": 14,
+    },
+    "text_cfg": {
+      "context_length": 77,
+      "vocab_size": 49408,
+      "width": 1024,
+      "n_heads": 16,
+      "layers": 24,
+    },
+    "return_pooled": False,
+    "ln_penultimate": True,
+  }
+}
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L498
 class FrozenOpenClipEmbedder(Embedder):
-  def __init__(self, dims:int, n_heads:int, layers:int, return_pooled:bool, ln_penultimate:bool=False):
+  def __init__(self, dims:int, text_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False):
     self.tokenizer = Tokenizer.ClipTokenizer()
-    self.model = Open.ClipTextTransformer(dims, n_heads, layers)
+    self.model = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
     self.return_pooled = return_pooled
     self.input_key = "txt"
     self.ln_penultimate = ln_penultimate
@@ -335,9 +351,10 @@ class FrozenOpenClipEmbedder(Embedder):
       x, penultimate = r(x, attn_mask=attn_mask), x
     return x.permute(1,0,2), penultimate.permute(1,0,2)
 
-  def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
-    tokens = Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1)
+  def tokenize(self, text:str, device:Optional[str]=None) -> Tensor:
+    return Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=device).reshape(1,-1)
 
+  def embed_tokens(self, tokens:Tensor) -> Union[Tensor,Tuple[Tensor,...]]:
     x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
     x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
 
@@ -350,3 +367,26 @@ class FrozenOpenClipEmbedder(Embedder):
       return penultimate, pooled
     else:
       return penultimate
+
+  def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
+    tokens = self.tokenize(text)
+    return self.embed_tokens(tokens)
+
+
+class OpenClipEncoder:
+  def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False):
+    # TODO: vision
+
+    text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
+    self.transformer = text.transformer
+    self.token_embedding = text.token_embedding
+    self.positional_embedding = text.positional_embedding
+    self.ln_final = text.ln_final
+    self.text_projection = text.text_projection
+    self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
+
+  def preprocess(self, x:Tensor) -> Tensor:
+    pass
+
+  def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
+    pass
