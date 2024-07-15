@@ -23,28 +23,40 @@ def bilinear_interp(x:Tensor, out_size=(299,299), align_corners=False) -> Tensor
   return x
 
 if __name__ == "__main__":
-  im = Image.open("/home/tiny/tinygrad/examples/stable_diffusion_seed0.png")
-  x = Tensor(np.array(im)).cast(dtypes.float32)
-  x = x.permute(2, 0, 1)
+  # im = Image.open("/home/tiny/tinygrad/examples/stable_diffusion_seed0.png")
+  # x = Tensor(np.array(im)).cast(dtypes.float32)
+  # x = x.permute(2, 0, 1)
+  # print(x.shape)
+
+
+  # x_pytorch = torch.tensor(x.unsqueeze(0).numpy())
+  # x_pytorch = F.interpolate(x_pytorch, size=(299,299), mode="bilinear", align_corners=False)
+  # x = bilinear_interp(x)
+
+  # a,b = x.numpy(),x_pytorch.cpu().numpy()
+  # print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+
+  # diff = (x.permute(1, 2, 0).numpy() - x_pytorch.squeeze(0).permute(1, 2, 0).cpu().numpy()) + 127.0
+  # imd = Image.fromarray(diff.astype(np.uint8))
+  # imd.save(f"/tmp/resized_diff.png")
+
+  # print(x.shape)
+  # x = x.permute(1, 2, 0).cast(dtypes.uint8)
+  # print(x.shape)
+  # im = Image.fromarray(x.numpy())
+  # im.save(f"/tmp/resized.png")
+
+  # im2 = Image.fromarray((x_pytorch).squeeze(0).permute(1, 2, 0).to(torch.uint8).cpu().numpy())
+  # im2.save(f"/tmp/resized_pytorch.png")
+
+
+
+  # x = Tensor.randn(16,5,512)
+  # x = Tensor.interpolate(x, (299,), mode="linear")
+  # x.realize()
+  # print(x.shape)
+
+  x = Tensor.randn(43,21)
+  x = Tensor.interpolate(x, (64,64), mode="linear")
+  x.realize()
   print(x.shape)
-
-
-  x_pytorch = torch.tensor(x.unsqueeze(0).numpy())
-  x_pytorch = F.interpolate(x_pytorch, size=(299,299), mode="bilinear", align_corners=False)
-  x = bilinear_interp(x)
-
-  a,b = x.numpy(),x_pytorch.cpu().numpy()
-  print(f"| {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-
-  diff = (x.permute(1, 2, 0).numpy() - x_pytorch.squeeze(0).permute(1, 2, 0).cpu().numpy()) + 127.0
-  imd = Image.fromarray(diff.astype(np.uint8))
-  imd.save(f"/tmp/resized_diff.png")
-
-  print(x.shape)
-  x = x.permute(1, 2, 0).cast(dtypes.uint8)
-  print(x.shape)
-  im = Image.fromarray(x.numpy())
-  im.save(f"/tmp/resized.png")
-
-  im2 = Image.fromarray((x_pytorch).squeeze(0).permute(1, 2, 0).to(torch.uint8).cpu().numpy())
-  im2.save(f"/tmp/resized_pytorch.png")
