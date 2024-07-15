@@ -1,9 +1,35 @@
-from tinygrad import Tensor # type: ignore
+from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.nn import Conv2d, BatchNorm2d, Linear # type: ignore
 from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from functools import lru_cache
-from interpolation import bilinear_interp
+
+# TODO: remove
+def interpolate(self:Tensor, size, mode:str="linear", align_corners:bool=False) -> Tensor:
+  """
+  Downsamples or Upsamples to the requested size, accepts 0 to N batch dimensions.
+  The type of sampling is selected with `mode` which currently only supports `linear`.
+  To run `bilinear` or `trilinear` pass in a 2D or 3D size.
+  ```python exec="true" source="above" session="tensor" result="python"
+  t = Tensor([[1, 2, 3, 4], [21, 22, 23, 24], [41, 42, 43, 44]])
+  print(t.numpy())
+  ```
+  ```python exec="true" source="above" session="tensor" result="python"
+  print(t.interpolate(size=(2,3), mode="linear").numpy())
+  ```
+  """
+  assert isinstance(size, (tuple,list)) and all(isinstance(s, int) for s in size) and len(size) > 0 and len(size) <= self.ndim
+  assert mode == "linear", "only linear interpolate supported right now"
+  x, expand = self, list(s for s in self.shape)
+  for i in range(-len(size), 0):
+    scale = (self.shape[i] - (1 if align_corners else 0)) / (size[i] - (1 if align_corners else 0))
+    arr, reshape = Tensor.arange(size[i]).cast(dtypes.float32), [1 for _ in range(self.ndim)]
+    index = (scale*arr if align_corners else (scale*(arr+0.5))-0.5).clip(0, self.shape[i]-1)
+    reshape[i] = expand[i] = size[i]
+    low, high, perc = [y.reshape(reshape).expand(expand) for y in (index.floor(), index.ceil(), index - index.floor())]
+    x = x.gather(i, low)*(1.0 - perc) + x.gather(i, high)*perc
+  return x
+Tensor.interpolate = interpolate
 
 from typing import Optional, Dict
 
@@ -238,6 +264,7 @@ class FidInceptionE2(InceptionE):
 def default_fid():
   return torch_load(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth"))
 
+overwrite = False
 class InceptionV3:
   def __init__(self):
     self.output_blocks = [2048]
@@ -282,12 +309,12 @@ class InceptionV3:
     ]
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = bilinear_interp(x)
+    x = x.interpolate((299,299), mode="linear")
     x = (x * 2) - 1
 
     a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_0.npy")
     print(f"| 0 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
+    if overwrite: x = Tensor(b)
     x = x.sequential([
       self.inception.Conv2d_1a_3x3,
       self.inception.Conv2d_2a_3x3,
@@ -297,7 +324,7 @@ class InceptionV3:
 
     a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_1.npy")
     print(f"| 1 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
+    if overwrite: x = Tensor(b)
     x = x.sequential([
       self.inception.Conv2d_3b_1x1,
       self.inception.Conv2d_4a_3x3,
@@ -306,7 +333,7 @@ class InceptionV3:
 
     a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_2.npy")
     print(f"| 2 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
+    if overwrite: x = Tensor(b)
     x = x.sequential([
       self.inception.Mixed_5b,
       self.inception.Mixed_5c,
@@ -320,7 +347,7 @@ class InceptionV3:
 
     a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_3.npy")
     print(f"| 3 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
+    if overwrite: x = Tensor(b)
     x = x.sequential([
       self.inception.Mixed_7a,
       self.inception.Mixed_7b,
