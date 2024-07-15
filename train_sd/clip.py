@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from tinygrad.nn import Linear, LayerNorm, Embedding # type: ignore
+from tinygrad.nn import Linear, LayerNorm, Embedding, Conv2d # type: ignore
 
 from typing import List, Optional, Union, Tuple, Dict
 from abc import ABC, abstractmethod
@@ -313,23 +313,49 @@ class Open:
 
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
+  
+  class VisionTransformer:
+    def __init__(self, width:int, layers:int, d_head:int, image_size:int, patch_size:int):
+      grid_size = image_size // patch_size
+      n_heads = width // d_head
+      assert n_heads * d_head == width
+
+      self.conv1 = Conv2d(3, width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+      self.class_embedding = Tensor.empty(width)
+      self.positional_embedding = Tensor.empty(grid_size * grid_size + 1, width)
+      self.transformer = Open.ClipTransformer(width, layers, n_heads)
+      self.ln_post = LayerNorm(width)
+      self.proj = Tensor.empty(width, 512)
+
+    def __call__(self, x:Tensor) -> Tensor:
+      x = self.conv1(x).reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
+      x = self.class_embedding.reshape(1, 1, -1).expand(x.shape[0], 1, -1).cat(x, dim=1)
+      x = x + self.positional_embedding
+
+      x = self.transformer(x)
+      x = self.ln_post(x)
+
+      pooled = x[:, 0] @ self.proj
+      return pooled
+
 
 clip_configs = {
   "ViT-H-14": {
     "dims": 1024,
     "vision_cfg": {
-      "image_size": 224,
-      "layers": 32,
       "width": 1280,
+      "layers": 32,
       "d_head": 80,
+      "image_size": 224,
       "patch_size": 14,
     },
     "text_cfg": {
-      "context_length": 77,
-      "vocab_size": 49408,
       "width": 1024,
       "n_heads": 16,
       "layers": 24,
+      "context_length": 77,
+      "vocab_size": 49408,
     },
     "return_pooled": False,
     "ln_penultimate": True,
@@ -374,7 +400,7 @@ class FrozenOpenClipEmbedder(Embedder):
 
 
 class OpenClipEncoder:
-  def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False):
+  def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict):
     self.visual = lambda x: x # TODO: vision
 
     text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
