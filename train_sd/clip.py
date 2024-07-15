@@ -314,7 +314,7 @@ class Open:
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
 
-configs = {
+clip_configs = {
   "ViT-H-14": {
     "dims": 1024,
     "vision_cfg": {
@@ -339,17 +339,12 @@ configs = {
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L498
 class FrozenOpenClipEmbedder(Embedder):
-  def __init__(self, dims:int, text_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False):
+  def __init__(self, dims:int, text_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False, vision_cfg:Optional[Dict]=None):
     self.tokenizer = Tokenizer.ClipTokenizer()
     self.model = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
     self.return_pooled = return_pooled
     self.input_key = "txt"
     self.ln_penultimate = ln_penultimate
-
-  def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
-    for r in self.model.transformer.resblocks:
-      x, penultimate = r(x, attn_mask=attn_mask), x
-    return x.permute(1,0,2), penultimate.permute(1,0,2)
 
   def tokenize(self, text:str, device:Optional[str]=None) -> Tensor:
     return Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=device).reshape(1,-1)
@@ -363,10 +358,15 @@ class FrozenOpenClipEmbedder(Embedder):
 
     if self.return_pooled:
       x = self.model.ln_final(x)
-      pooled = x[Tensor.arange(x.shape[0]), tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
+      pooled = x[:, tokens.argmax(axis=-1).numpy().item()] @ self.model.text_projection
       return penultimate, pooled
     else:
       return penultimate
+
+  def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
+    for r in self.model.transformer.resblocks:
+      x, penultimate = r(x, attn_mask=attn_mask), x
+    return x.permute(1,0,2), penultimate.permute(1,0,2)
 
   def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     tokens = self.tokenize(text)
@@ -375,7 +375,7 @@ class FrozenOpenClipEmbedder(Embedder):
 
 class OpenClipEncoder:
   def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False):
-    # TODO: vision
+    self.visual = lambda x: x # TODO: vision
 
     text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
     self.transformer = text.transformer
@@ -386,7 +386,24 @@ class OpenClipEncoder:
     self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
 
   def preprocess(self, x:Tensor) -> Tensor:
-    pass
+    # FIXME: implement
+    return x
+
+  def encode_tokens(self, tokens:Tensor) -> Tensor:
+    x = self.token_embedding(tokens)
+    x = x + self.positional_embedding
+    x = self.transformer(x, attn_mask=self.attn_mask)
+    x = self.ln_final(x)
+    x = x[:, tokens.argmax(axis=-1)]
+    x = x @ self.text_projection
+    return x
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
-    pass
+    image = self.preprocess(image).unsqueeze(0)
+    image_features: Tensor = self.visual(image)
+    image_features /= image_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
+
+    text_features = self.encode_tokens(tokens)
+    text_features /= text_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
+
+    return image_features @ text_features.T
