@@ -1,43 +1,18 @@
-from tinygrad import Tensor, dtypes # type: ignore
+from tinygrad import Tensor # type: ignore
 from tinygrad.nn import Conv2d, BatchNorm2d, Linear # type: ignore
 from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
 from tinygrad.helpers import fetch # type: ignore
-from functools import lru_cache
-
-# TODO: remove
-def interpolate(self:Tensor, size, mode:str="linear", align_corners:bool=False) -> Tensor:
-  """
-  Downsamples or Upsamples to the requested size, accepts 0 to N batch dimensions.
-  The type of sampling is selected with `mode` which currently only supports `linear`.
-  To run `bilinear` or `trilinear` pass in a 2D or 3D size.
-  ```python exec="true" source="above" session="tensor" result="python"
-  t = Tensor([[1, 2, 3, 4], [21, 22, 23, 24], [41, 42, 43, 44]])
-  print(t.numpy())
-  ```
-  ```python exec="true" source="above" session="tensor" result="python"
-  print(t.interpolate(size=(2,3), mode="linear").numpy())
-  ```
-  """
-  assert isinstance(size, (tuple,list)) and all(isinstance(s, int) for s in size) and len(size) > 0 and len(size) <= self.ndim
-  assert mode == "linear", "only linear interpolate supported right now"
-  x, expand = self, list(s for s in self.shape)
-  for i in range(-len(size), 0):
-    scale = (self.shape[i] - (1 if align_corners else 0)) / (size[i] - (1 if align_corners else 0))
-    arr, reshape = Tensor.arange(size[i]).cast(dtypes.float32), [1 for _ in range(self.ndim)]
-    index = (scale*arr if align_corners else (scale*(arr+0.5))-0.5).clip(0, self.shape[i]-1)
-    reshape[i] = expand[i] = size[i]
-    low, high, perc = [y.reshape(reshape).expand(expand) for y in (index.floor(), index.ceil(), index - index.floor())]
-    x = x.gather(i, low)*(1.0 - perc) + x.gather(i, high)*perc
-  return x
-Tensor.interpolate = interpolate
 
 from typing import Optional, Dict
+from functools import lru_cache
+
+# Base Inception Model
 
 class BasicConv2d:
   def __init__(self, in_ch:int, out_ch:int, **kwargs):
     self.conv = Conv2d(in_ch, out_ch, bias=False, **kwargs)
     self.bn   = BatchNorm2d(out_ch, eps=0.001)
-  
+
   def __call__(self, x:Tensor) -> Tensor:
     return x.sequential([self.conv, self.bn, Tensor.relu])
 
@@ -70,7 +45,7 @@ class InceptionB:
     self.branch3x3dbl_1 = BasicConv2d(in_ch, 64, kernel_size=1)
     self.branch3x3dbl_2 = BasicConv2d(64, 96, kernel_size=(3,3), padding=1)
     self.branch3x3dbl_3 = BasicConv2d(96, 96, kernel_size=(3,3), stride=2)
-  
+
   def __call__(self, x:Tensor) -> Tensor:
     outputs = [
       self.branch3x3(x),
@@ -100,7 +75,7 @@ class InceptionC:
       self.branch1x1(x),
       x.sequential([self.branch7x7_1, self.branch7x7_2, self.branch7x7_3]),
       x.sequential([self.branch7x7dbl_1, self.branch7x7dbl_2, self.branch7x7dbl_3, self.branch7x7dbl_4, self.branch7x7dbl_5]),
-      self.branch_pool(x.avg_pool2d(x, kernel_size=(3,3), stride=1, padding=1)),
+      self.branch_pool(x.avg_pool2d(kernel_size=(3,3), stride=1, padding=1)),
     ]
     return Tensor.cat(*outputs, dim=1)
 
@@ -152,9 +127,7 @@ class InceptionAux:
   def __init__(self, in_ch:int, num_classes:int):
     self.conv0 = BasicConv2d(in_ch, 128, kernel_size=1)
     self.conv1 = BasicConv2d(128, 768, kernel_size=5)
-    # self.conv1.stddev = 0.01
     self.fc = Linear(768, num_classes)
-    # self.fc.stddev = 0.001
 
   def __call__(self, x:Tensor) -> Tensor:
     x = x.avg_pool2d(kernel_size=5, stride=3, padding=1).sequential([self.conv0, self.conv1])
@@ -163,8 +136,8 @@ class InceptionAux:
 
 class Inception3:
   def __init__(self, num_classes:int=1008, cls_map:Optional[Dict]=None):
-    def get_cls(key1:str,key2:str,default):
-      return default if cls_map is None else cls_map.get(key1, cls_map.get(key2,default))
+    def get_cls(key1:str, key2:str, default):
+      return default if cls_map is None else cls_map.get(key1, cls_map.get(key2, default))
 
     self.transform_input = False
     self.Conv2d_1a_3x3 = BasicConv2d(3, 32, kernel_size=(3,3), stride=2)
@@ -185,8 +158,7 @@ class Inception3:
     self.Mixed_7a = get_cls("D1","D",InceptionD)(768)
     self.Mixed_7b = get_cls("E1","E",InceptionE)(1280)
     self.Mixed_7c = get_cls("E2","E",InceptionE)(2048)
-    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), padding=1) # TODO: is this right for -> AdaptiveAvgPool2d((1, 1))
-    self.dropout = 0.0
+    self.avgpool = lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), padding=1)
     self.fc = Linear(2048, num_classes)
 
   def __call__(self, x:Tensor) -> Tensor:
@@ -195,9 +167,11 @@ class Inception3:
       self.Conv2d_2a_3x3,
       self.Conv2d_2b_3x3,
       self.maxpool1,
+
       self.Conv2d_3b_1x1,
       self.Conv2d_4a_3x3,
       self.maxpool2,
+
       self.Mixed_5b,
       self.Mixed_5c,
       self.Mixed_5d,
@@ -206,15 +180,18 @@ class Inception3:
       self.Mixed_6c,
       self.Mixed_6d,
       self.Mixed_6e,
+
       self.Mixed_7a,
       self.Mixed_7b,
       self.Mixed_7c,
       self.avgpool,
+
       lambda y: y.reshape(x.shape[0],-1),
       self.fc,
     ])
 
 
+# FID Inception Variation
 
 class FidInceptionA(InceptionA):
   def __call__(self, x:Tensor) -> Tensor:
@@ -264,11 +241,8 @@ class FidInceptionE2(InceptionE):
 def default_fid():
   return torch_load(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth"))
 
-overwrite = False
-class InceptionV3:
+class FidInceptionV3:
   def __init__(self):
-    self.output_blocks = [2048]
-
     inception = Inception3(cls_map={
       "A":  FidInceptionA,
       "C":  FidInceptionC,
@@ -280,8 +254,6 @@ class InceptionV3:
       if k.endswith(".num_batches_tracked"):
         state_dict[k] = v.reshape(1)
     load_state_dict(inception, state_dict)
-
-    self.inception = inception
 
     self.blocks = [
       inception.Conv2d_1a_3x3,
@@ -305,62 +277,16 @@ class InceptionV3:
       inception.Mixed_7a,
       inception.Mixed_7b,
       inception.Mixed_7c,
-      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8), padding=1),
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
     ]
 
   def __call__(self, x:Tensor) -> Tensor:
     x = x.interpolate((299,299), mode="linear")
     x = (x * 2) - 1
-
-    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_0.npy")
-    print(f"| 0 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    if overwrite: x = Tensor(b)
-    x = x.sequential([
-      self.inception.Conv2d_1a_3x3,
-      self.inception.Conv2d_2a_3x3,
-      self.inception.Conv2d_2b_3x3,
-      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
-    ])
-
-    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_1.npy")
-    print(f"| 1 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    if overwrite: x = Tensor(b)
-    x = x.sequential([
-      self.inception.Conv2d_3b_1x1,
-      self.inception.Conv2d_4a_3x3,
-      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
-    ])
-
-    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_2.npy")
-    print(f"| 2 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    if overwrite: x = Tensor(b)
-    x = x.sequential([
-      self.inception.Mixed_5b,
-      self.inception.Mixed_5c,
-      self.inception.Mixed_5d,
-      self.inception.Mixed_6a,
-      self.inception.Mixed_6b,
-      self.inception.Mixed_6c,
-      self.inception.Mixed_6d,
-      self.inception.Mixed_6e,
-    ])
-
-    a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/inception/input_to_block_3.npy")
-    print(f"| 3 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    if overwrite: x = Tensor(b)
-    x = x.sequential([
-      self.inception.Mixed_7a,
-      self.inception.Mixed_7b,
-      self.inception.Mixed_7c,
-      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
-    ])
-
-    return x
-
-    # return x.sequential(self.blocks)
+    return x.sequential(self.blocks)
 
 if __name__ == "__main__":
-  model = InceptionV3()
+  model = FidInceptionV3()
 
   import numpy as np
   x = Tensor(np.load("/home/tiny/weights_cache/inception/input_x.npy")).permute(2, 0, 1).unsqueeze(0)
