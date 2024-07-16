@@ -5,6 +5,8 @@ from tinygrad.nn import Linear, LayerNorm, Embedding, Conv2d # type: ignore
 from typing import List, Optional, Union, Tuple, Dict
 from abc import ABC, abstractmethod
 from functools import lru_cache
+from PIL import Image
+import numpy as np
 import re, gzip
 
 @lru_cache()
@@ -326,7 +328,7 @@ class Open:
       self.positional_embedding = Tensor.empty(grid_size * grid_size + 1, width)
       self.transformer = Open.ClipTransformer(width, layers, n_heads)
       self.ln_post = LayerNorm(width)
-      self.proj = Tensor.empty(width, 512)
+      self.proj = Tensor.empty(width, 1024)
 
     def __call__(self, x:Tensor) -> Tensor:
       x = self.conv1(x).reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
@@ -340,7 +342,7 @@ class Open:
       return pooled
 
 
-clip_configs = {
+clip_configs: Dict = {
   "ViT-H-14": {
     "dims": 1024,
     "vision_cfg": {
@@ -400,8 +402,8 @@ class FrozenOpenClipEmbedder(Embedder):
 
 
 class OpenClipEncoder:
-  def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict):
-    self.visual = lambda x: x # TODO: vision
+  def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, **_):
+    self.visual = Open.VisionTransformer(**vision_cfg)
 
     text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
     self.transformer = text.transformer
@@ -410,6 +412,20 @@ class OpenClipEncoder:
     self.ln_final = text.ln_final
     self.text_projection = text.text_projection
     self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
+
+  def prepare_image(self, image:Image.Image) -> Tensor:
+    SIZE = 224
+    w, h = image.size
+    scale = min(h / SIZE, w / SIZE)
+    image = image.resize((max(int(w*scale),SIZE),max(int(h*scale),SIZE)), Image.Resampling.BICUBIC)
+    w, h = image.size
+    if w > SIZE:
+      left = (w - SIZE) // 2
+      image = image.crop((left, left+SIZE, 0, SIZE))
+    elif h > SIZE:
+      top = (h - SIZE) // 2
+      image = image.crop((0, SIZE, top, top+SIZE))
+    return Tensor(np.array(image.convert('RGB')))
 
   def preprocess(self, x:Tensor) -> Tensor:
     # FIXME: implement
@@ -433,3 +449,16 @@ class OpenClipEncoder:
     text_features /= text_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
     return image_features @ text_features.T
+
+if __name__ == "__main__":
+  clip = OpenClipEncoder(**clip_configs["ViT-H-14"])
+  tokenizer = Tokenizer.ClipTokenizer()
+
+  from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
+  load_state_dict(clip, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
+
+  im = Image.open("/home/tiny/tinygrad/examples/stable_diffusion_seed0.png")
+  text = "a horse sized cat eating a bagel"
+
+  score = clip.get_clip_score(tokenizer.encode(text), clip.prepare_image(im))
+  print(score.numpy())
