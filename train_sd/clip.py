@@ -287,11 +287,17 @@ class Open:
         Open.ResidualAttentionBlocks(dims, n_heads, mlp_ratio) for _ in range(layers)
       ]
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-      x = x.transpose(0, 1).contiguous()
-      for r in self.resblocks:
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, batch_first:bool=False, compare=False) -> Tensor:
+      if not batch_first:
+        x = x.transpose(0, 1).contiguous()
+      for i, r in enumerate(self.resblocks):
+        if compare:
+          a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
+          print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+          x = Tensor(b)
         x = r(x, attn_mask=attn_mask)
-      x = x.transpose(0, 1)
+      if not batch_first:
+        x = x.transpose(0, 1)
       return x
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
@@ -338,10 +344,10 @@ class Open:
 
       x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
 
-      x = self.transformer(x)
+      x = self.transformer(x, batch_first=True, compare=True)
 
       a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
-      print(f"| 3 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      print(f"| transformer | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
       x = Tensor(b)
 
       x = self.ln_post(x)
