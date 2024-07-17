@@ -331,7 +331,8 @@ class Open:
       self.proj = Tensor.empty(width, 1024)
 
     def __call__(self, x:Tensor) -> Tensor:
-      x = self.conv1(x).reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
+      x = self.conv1(x)
+      x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
       x = self.class_embedding.reshape(1, 1, -1).expand(x.shape[0], 1, -1).cat(x, dim=1)
       x = x + self.positional_embedding
 
@@ -411,12 +412,18 @@ class OpenClipEncoder:
     self.positional_embedding = text.positional_embedding
     self.ln_final = text.ln_final
     self.text_projection = text.text_projection
-    self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
 
+    self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
+    self.mean = Tensor([0.48145466, 0.45782750, 0.40821073]).reshape(-1, 1, 1)
+    self.std  = Tensor([0.26862954, 0.26130258, 0.27577711]).reshape(-1, 1, 1)
+
+  # TODO:
+  # Should be doable in pure tinygrad, would just require some work and verification.
+  # This is very desirable since it would allow for full generation->evaluation in a single JIT call.
   def prepare_image(self, image:Image.Image) -> Tensor:
     SIZE = 224
     w, h = image.size
-    scale = min(h / SIZE, w / SIZE)
+    scale = min(SIZE / h, SIZE / w)
     image = image.resize((max(int(w*scale),SIZE),max(int(h*scale),SIZE)), Image.Resampling.BICUBIC)
     w, h = image.size
     if w > SIZE:
@@ -425,11 +432,10 @@ class OpenClipEncoder:
     elif h > SIZE:
       top = (h - SIZE) // 2
       image = image.crop((0, SIZE, top, top+SIZE))
-    return Tensor(np.array(image.convert('RGB')))
 
-  def preprocess(self, x:Tensor) -> Tensor:
-    # FIXME: implement
-    return x
+    x = Tensor(np.array(image.convert('RGB')))
+    x = x.permute(2, 0, 1).cast(dtypes.float32) / 255.0
+    return (x - self.mean) / self.std
 
   def encode_tokens(self, tokens:Tensor) -> Tensor:
     x = self.token_embedding(tokens)
@@ -441,11 +447,16 @@ class OpenClipEncoder:
     return x
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
-    image = self.preprocess(image).unsqueeze(0)
-    image_features: Tensor = self.visual(image)
+    image = Tensor(np.load("/home/tiny/weights_cache/clip/image_in.npy"))
+    image_features: Tensor = self.visual(image)#.unsqueeze(0))
+    a,b = image_features.numpy(),np.load("/home/tiny/weights_cache/clip/image_features.npy")
+    print(f"| img | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
     image_features /= image_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
+    # tokens = Tensor(np.load("/home/tiny/weights_cache/clip/text_in.npy"))
     text_features = self.encode_tokens(tokens)
+    a,b = image_features.numpy(),np.load("/home/tiny/weights_cache/clip/text_features.npy")
+    print(f"| txt | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
     text_features /= text_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
     return image_features @ text_features.T
@@ -460,5 +471,5 @@ if __name__ == "__main__":
   im = Image.open("/home/tiny/tinygrad/examples/stable_diffusion_seed0.png")
   text = "a horse sized cat eating a bagel"
 
-  score = clip.get_clip_score(tokenizer.encode(text), clip.prepare_image(im))
+  score = clip.get_clip_score(Tensor(tokenizer.encode(text)), clip.prepare_image(im))
   print(score.numpy())
