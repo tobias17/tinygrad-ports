@@ -336,10 +336,18 @@ class Open:
       x = self.class_embedding.reshape(1, 1, -1).expand(x.shape[0], 1, -1).cat(x, dim=1)
       x = x + self.positional_embedding
 
+      x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
+
       x = self.transformer(x)
+
+      a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
+      print(f"| 3 | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      x = Tensor(b)
+
       x = self.ln_post(x)
 
       pooled = x[:, 0] @ self.proj
+
       return pooled
 
 
