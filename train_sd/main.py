@@ -15,7 +15,7 @@ from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_s
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
-from inception import InceptionV3
+# from inception import InceptionV3
 
 # TODO:
 # - Figure out AdamW
@@ -121,8 +121,8 @@ if __name__ == "__main__":
   GRAPH_EVERY = 10
   SAVE_EVERY  = 1000
   ONLY_LAST   = True
-  losses = []
-  saved_losses = []
+  # losses = []
+  # saved_losses = []
 
   BEAM_VAL = BEAM.value
   BEAM.value = 0
@@ -134,7 +134,7 @@ if __name__ == "__main__":
 
   ##########################################
   sampler = DdimSampler()
-  inception = InceptionV3()
+  # inception = InceptionV3()
 
   for entry in dataloader:
     # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     
     x = Tensor.randn(1,3,512,512)
 
-    out = inception(x)
+    # out = inception(x)
     
 
     break

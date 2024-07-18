@@ -233,30 +233,30 @@ class Open:
   """
   class MultiheadAttention:
     def __init__(self, dims:int, n_heads:int):
-      self.dims     = dims
-      self.n_heads  = n_heads
-      self.d_head   = self.dims // self.n_heads
+      self.dims    = dims
+      self.n_heads = n_heads
+      self.d_head  = self.dims // self.n_heads
 
       self.in_proj_bias   = Tensor.empty(3*dims)
       self.in_proj_weight = Tensor.empty(3*dims, dims)
-      self.out_proj = Linear(dims, dims)
+      self.out_proj       = Linear(dims, dims)
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
+      x = x.transpose(0, 1)
       T,B,C = x.shape
 
       proj = x.linear(self.in_proj_weight.T, self.in_proj_bias)
-      proj = proj.unflatten(-1, (3,C)).unsqueeze(0).transpose(0,-2)
-      q,k,v = proj.chunk(3)
+      proj = proj.unflatten(-1, (3,C)).unsqueeze(0).transpose(0, -2)
 
-      q,k,v = [y.reshape(T, B*self.n_heads, self.d_head).transpose(0, 1).reshape(B, self.n_heads, T, self.d_head) for y in (q,k,v)]
+      q,k,v = [y.reshape(T, B*self.n_heads, self.d_head).transpose(0, 1).reshape(B, self.n_heads, T, self.d_head) for y in proj.chunk(3)]
 
       attn_output = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-      attn_output = attn_output.permute(2,0,1,3).reshape(B*T, C)
+      attn_output = attn_output.permute(2, 0, 1, 3).reshape(T*B, C)
 
       attn_output = self.out_proj(attn_output)
       attn_output = attn_output.reshape(T, B, C)
 
-      return attn_output
+      return attn_output.transpose(0, 1)
 
   class Mlp:
     def __init__(self, dims, hidden_dims):
@@ -267,7 +267,7 @@ class Open:
       return x.sequential([self.c_fc, Tensor.gelu, self.c_proj])
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L210
-  class ResidualAttentionBlocks:
+  class ResidualAttentionBlock:
     def __init__(self, dims:int, n_heads:int, mlp_ratio:float):
       self.ln_1 = LayerNorm(dims)
       self.attn = Open.MultiheadAttention(dims, n_heads)
@@ -275,20 +275,25 @@ class Open:
       self.ln_2 = LayerNorm(dims)
       self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-      x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, idx=-1) -> Tensor:
+      q_x = self.ln_1(x)
+      if idx >= 0:
+        a,b = q_x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_x_{idx}.npy")
+        print(f"| qx_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      attn_out = self.attn(q_x, attn_mask=attn_mask)
+      if idx >= 0:
+        a,b = attn_out.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_o_{idx}.npy")
+        print(f"| qo_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+        attn_out = Tensor(b)
+      x = x + attn_out
       x = x + self.mlp(self.ln_2(x))
       return x
 
-
-
-  ###############################################
-  #
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L317
   class ClipTransformer:
     def __init__(self, dims:int, layers:int, n_heads:int, mlp_ratio:float=4.0):
       self.resblocks = [
-        Open.ResidualAttentionBlocks(dims, n_heads, mlp_ratio) for _ in range(layers)
+        Open.ResidualAttentionBlock(dims, n_heads, mlp_ratio) for _ in range(layers)
       ]
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, batch_first:bool=False, compare=False) -> Tensor:
@@ -299,14 +304,10 @@ class Open:
           a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
           print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
           x = Tensor(b)
-        x = r(x, attn_mask=attn_mask)
+        x = r(x, attn_mask=attn_mask, idx=(i if compare else -1))
       if not batch_first:
         x = x.transpose(0, 1)
       return x
-  #
-  ###############################################
-
-
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
@@ -330,10 +331,6 @@ class Open:
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
   
-
-
-  ###############################################
-  #
   class VisionTransformer:
     def __init__(self, width:int, layers:int, d_head:int, image_size:int, patch_size:int):
       grid_size = image_size // patch_size
@@ -369,10 +366,6 @@ class Open:
       pooled = x[:, 0] @ self.proj
 
       return pooled
-  #
-  ###############################################
-
-
 
 
 clip_configs: Dict = {
