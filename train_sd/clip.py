@@ -462,48 +462,13 @@ class OpenClipEncoder:
     return (x - self.mean) / self.std
 
   def encode_tokens(self, tokens:Tensor) -> Tensor:
-
-    a,b = tokens.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_in.npy")
-    print(f"| in   | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    tokens = Tensor(b)
-
     x = self.token_embedding(tokens)
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_emb.npy")
-    print(f"| emb  | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-
     x = x + self.positional_embedding
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_pos.npy")
-    print(f"| pos  | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-
     x = self.transformer(x, attn_mask=self.attn_mask, batch_first=True, transpose=True)
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_attn.npy")
-    print(f"| attn | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-    
     x = self.ln_final(x)
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_ln_f.npy")
-    print(f"| ln_f | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-
     x = x[:, tokens.argmax(axis=-1)]
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_pool.npy")
-    print(f"| pool | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-
     x = x @ self.text_projection
-
-    a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/text_transformer_proj.npy")
-    print(f"| proj | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-    x = Tensor(b)
-
-    return x #.squeeze(0)
+    return x.squeeze(0)
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
     image = Tensor(np.load("/home/tiny/weights_cache/clip/image_in.npy"))
@@ -531,6 +496,5 @@ if __name__ == "__main__":
   text = "a horse sized cat eating a bagel"
 
   tokens = Tensor(tokenizer.encode(text, pad_with_zeros=True)).unsqueeze(0)
-
   score = clip.get_clip_score(tokens, clip.prepare_image(im))
   print(score.numpy())
