@@ -274,7 +274,7 @@ class Open:
       self.ln_2 = LayerNorm(dims)
       self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, transpose:bool=False, idx=-1) -> Tensor:
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, transpose:bool=False) -> Tensor:
       q_x = self.ln_1(x)
       # if idx >= 0:
       #   a,b = q_x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_x_{idx}.npy")
@@ -295,17 +295,17 @@ class Open:
         Open.ResidualAttentionBlock(dims, n_heads, mlp_ratio) for _ in range(layers)
       ]
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, batch_first:bool=False, transpose:bool=False, compare=False) -> Tensor:
-      if not batch_first:
-        x = x.transpose(0, 1).contiguous()
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
+      # if not batch_first:
+      #   x = x.transpose(0, 1).contiguous()
       for i, r in enumerate(self.resblocks):
-        if compare:
-          a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
-          print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-          x = Tensor(b)
-        x = r(x, attn_mask=attn_mask, transpose=transpose, idx=(i if compare else -1))
-      if not batch_first:
-        x = x.transpose(0, 1)
+        # if compare:
+        #   a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
+        #   print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+        #   x = Tensor(b)
+        x = r(x, attn_mask=attn_mask, transpose=True)
+      # if not batch_first:
+      #   x = x.transpose(0, 1)
       return x
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
@@ -324,7 +324,7 @@ class Open:
 
       x = self.token_embedding(text)
       x = x + self.positional_embedding[:seq_len]
-      x = self.transformer(x, attn_mask=self.attn_mask, batch_first=True, transpose=True)
+      x = self.transformer(x, attn_mask=self.attn_mask)
       x = self.ln_final(x)
 
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
@@ -354,7 +354,7 @@ class Open:
       # x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
 
       x = self.ln_pre(x)
-      x = self.transformer(x, batch_first=True, transpose=True)
+      x = self.transformer(x)
 
       # a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
       # print(f"| transformer | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
@@ -367,34 +367,12 @@ class Open:
       return pooled
 
 
-clip_configs: Dict = {
-  "ViT-H-14": {
-    "dims": 1024,
-    "vision_cfg": {
-      "width": 1280,
-      "layers": 32,
-      "d_head": 80,
-      "image_size": 224,
-      "patch_size": 14,
-    },
-    "text_cfg": {
-      "width": 1024,
-      "n_heads": 16,
-      "layers": 24,
-      "context_length": 77,
-      "vocab_size": 49408,
-    },
-    "return_pooled": False,
-    "ln_penultimate": True,
-  }
-}
-
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L396
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/encoders/modules.py#L498
 class FrozenOpenClipEmbedder(Embedder):
-  def __init__(self, dims:int, text_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False, vision_cfg:Optional[Dict]=None):
+  def __init__(self, dims:int, n_heads:int, layers:int, return_pooled:bool, ln_penultimate:bool=False):
     self.tokenizer = Tokenizer.ClipTokenizer()
-    self.model = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["layers"])
+    self.model = Open.ClipTextTransformer(dims, n_heads, layers)
     self.return_pooled = return_pooled
     self.input_key = "txt"
     self.ln_penultimate = ln_penultimate
@@ -425,6 +403,28 @@ class FrozenOpenClipEmbedder(Embedder):
     tokens = self.tokenize(text)
     return self.embed_tokens(tokens)
 
+
+clip_configs: Dict = {
+  "ViT-H-14": {
+    "dims": 1024,
+    "vision_cfg": {
+      "width": 1280,
+      "layers": 32,
+      "d_head": 80,
+      "image_size": 224,
+      "patch_size": 14,
+    },
+    "text_cfg": {
+      "width": 1024,
+      "n_heads": 16,
+      "layers": 24,
+      "context_length": 77,
+      "vocab_size": 49408,
+    },
+    "return_pooled": False,
+    "ln_penultimate": True,
+  }
+}
 
 class OpenClipEncoder:
   def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, **_):
@@ -464,7 +464,7 @@ class OpenClipEncoder:
   def encode_tokens(self, tokens:Tensor) -> Tensor:
     x = self.token_embedding(tokens)
     x = x + self.positional_embedding
-    x = self.transformer(x, attn_mask=self.attn_mask, batch_first=True, transpose=True)
+    x = self.transformer(x, attn_mask=self.attn_mask)
     x = self.ln_final(x)
     x = x[:, tokens.argmax(axis=-1)]
     x = x @ self.text_projection
@@ -485,6 +485,7 @@ class OpenClipEncoder:
 
     return image_features @ text_features.T
 
+
 if __name__ == "__main__":
   clip = OpenClipEncoder(**clip_configs["ViT-H-14"])
   tokenizer = Tokenizer.ClipTokenizer()
@@ -498,3 +499,24 @@ if __name__ == "__main__":
   tokens = Tensor(tokenizer.encode(text, pad_with_zeros=True)).unsqueeze(0)
   score = clip.get_clip_score(tokens, clip.prepare_image(im))
   print(score.numpy())
+
+if __name__ == "__main__":
+  import numpy as np
+  class Model:
+    def __init__(self):
+      self.cond_stage_model = FrozenOpenClipEmbedder(
+        dims=1024,
+        n_heads=16,
+        layers=24,
+        return_pooled=False,
+        ln_penultimate=True,
+      )
+  
+  model = Model()
+  from tinygrad.nn.state import load_state_dict, torch_load # type: ignore
+  load_state_dict(model, torch_load("/home/tiny/weights_cache/tinygrad/downloads/768-v-ema.ckpt")["state_dict"], strict=False)
+
+  text = "a horse sized cat eating a bagel"
+  tokens = model.cond_stage_model(text)
+  a,b = tokens.numpy(),np.load("/home/tiny/weights_cache/clip/old_tokens.npy")
+  print(f"| old | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
