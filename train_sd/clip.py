@@ -242,7 +242,6 @@ class Open:
       self.out_proj       = Linear(dims, dims)
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-      x = x.transpose(0, 1)
       T,B,C = x.shape
 
       proj = x.linear(self.in_proj_weight.T, self.in_proj_bias)
@@ -256,7 +255,7 @@ class Open:
       attn_output = self.out_proj(attn_output)
       attn_output = attn_output.reshape(T, B, C)
 
-      return attn_output.transpose(0, 1)
+      return attn_output
 
   class Mlp:
     def __init__(self, dims, hidden_dims):
@@ -275,16 +274,16 @@ class Open:
       self.ln_2 = LayerNorm(dims)
       self.mlp  = Open.Mlp(dims, int(dims * mlp_ratio))
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, idx=-1) -> Tensor:
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, transpose:bool=False, idx=-1) -> Tensor:
       q_x = self.ln_1(x)
-      if idx >= 0:
-        a,b = q_x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_x_{idx}.npy")
-        print(f"| qx_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-      attn_out = self.attn(q_x, attn_mask=attn_mask)
-      if idx >= 0:
-        a,b = attn_out.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_o_{idx}.npy")
-        print(f"| qo_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-        attn_out = Tensor(b)
+      # if idx >= 0:
+      #   a,b = q_x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_x_{idx}.npy")
+      #   print(f"| qx_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      attn_out = self.attn(q_x.transpose(0, 1) if transpose else q_x, attn_mask=attn_mask)
+      attn_out = attn_out.transpose(0, 1) if transpose else attn_out
+      # if idx >= 0:
+      #   a,b = attn_out.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_o_{idx}.npy")
+      #   print(f"| qo_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
       x = x + attn_out
       x = x + self.mlp(self.ln_2(x))
       return x
@@ -296,7 +295,7 @@ class Open:
         Open.ResidualAttentionBlock(dims, n_heads, mlp_ratio) for _ in range(layers)
       ]
 
-    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, batch_first:bool=False, compare=False) -> Tensor:
+    def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, batch_first:bool=False, transpose:bool=False, compare=False) -> Tensor:
       if not batch_first:
         x = x.transpose(0, 1).contiguous()
       for i, r in enumerate(self.resblocks):
@@ -304,7 +303,7 @@ class Open:
           a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
           print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
           x = Tensor(b)
-        x = r(x, attn_mask=attn_mask, idx=(i if compare else -1))
+        x = r(x, attn_mask=attn_mask, transpose=transpose, idx=(i if compare else -1))
       if not batch_first:
         x = x.transpose(0, 1)
       return x
@@ -325,7 +324,7 @@ class Open:
 
       x = self.token_embedding(text)
       x = x + self.positional_embedding[:seq_len]
-      x = self.transformer(x, attn_mask=self.attn_mask)
+      x = self.transformer(x, attn_mask=self.attn_mask, batch_first=True, transpose=True)
       x = self.ln_final(x)
 
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
@@ -352,14 +351,14 @@ class Open:
       x = self.class_embedding.reshape(1, 1, -1).expand(x.shape[0], 1, -1).cat(x, dim=1)
       x = x + self.positional_embedding
 
-      x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
+      # x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
 
       x = self.ln_pre(x)
-      x = self.transformer(x, batch_first=True, compare=True)
+      x = self.transformer(x, batch_first=True, compare=True, transpose=True)
 
-      a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
-      print(f"| transformer | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-      x = Tensor(b)
+      # a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
+      # print(f"| transformer | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+      # x = Tensor(b)
 
       x = self.ln_post(x)
 
