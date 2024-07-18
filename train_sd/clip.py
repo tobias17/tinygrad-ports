@@ -280,6 +280,10 @@ class Open:
       x = x + self.mlp(self.ln_2(x))
       return x
 
+
+
+  ###############################################
+  #
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L317
   class ClipTransformer:
     def __init__(self, dims:int, layers:int, n_heads:int, mlp_ratio:float=4.0):
@@ -299,6 +303,10 @@ class Open:
       if not batch_first:
         x = x.transpose(0, 1)
       return x
+  #
+  ###############################################
+
+
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
@@ -322,6 +330,10 @@ class Open:
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
   
+
+
+  ###############################################
+  #
   class VisionTransformer:
     def __init__(self, width:int, layers:int, d_head:int, image_size:int, patch_size:int):
       grid_size = image_size // patch_size
@@ -333,6 +345,7 @@ class Open:
       self.class_embedding = Tensor.empty(width)
       self.positional_embedding = Tensor.empty(grid_size * grid_size + 1, width)
       self.transformer = Open.ClipTransformer(width, layers, n_heads)
+      self.ln_pre  = LayerNorm(width)
       self.ln_post = LayerNorm(width)
       self.proj = Tensor.empty(width, 1024)
 
@@ -344,6 +357,7 @@ class Open:
 
       x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
 
+      x = self.ln_pre(x)
       x = self.transformer(x, batch_first=True, compare=True)
 
       a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
@@ -355,6 +369,10 @@ class Open:
       pooled = x[:, 0] @ self.proj
 
       return pooled
+  #
+  ###############################################
+
+
 
 
 clip_configs: Dict = {
@@ -384,7 +402,7 @@ clip_configs: Dict = {
 class FrozenOpenClipEmbedder(Embedder):
   def __init__(self, dims:int, text_cfg:Dict, return_pooled:bool, ln_penultimate:bool=False, vision_cfg:Optional[Dict]=None):
     self.tokenizer = Tokenizer.ClipTokenizer()
-    self.model = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
+    self.model = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["layers"])
     self.return_pooled = return_pooled
     self.input_key = "txt"
     self.ln_penultimate = ln_penultimate
@@ -420,7 +438,7 @@ class OpenClipEncoder:
   def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, **_):
     self.visual = Open.VisionTransformer(**vision_cfg)
 
-    text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["n_heads"])
+    text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["layers"])
     self.transformer = text.transformer
     self.token_embedding = text.token_embedding
     self.positional_embedding = text.positional_embedding
