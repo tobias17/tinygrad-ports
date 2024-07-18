@@ -276,14 +276,8 @@ class Open:
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None, transpose:bool=False) -> Tensor:
       q_x = self.ln_1(x)
-      # if idx >= 0:
-      #   a,b = q_x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_x_{idx}.npy")
-      #   print(f"| qx_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
       attn_out = self.attn(q_x.transpose(0, 1) if transpose else q_x, attn_mask=attn_mask)
       attn_out = attn_out.transpose(0, 1) if transpose else attn_out
-      # if idx >= 0:
-      #   a,b = attn_out.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_q_o_{idx}.npy")
-      #   print(f"| qo_{idx:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
       x = x + attn_out
       x = x + self.mlp(self.ln_2(x))
       return x
@@ -296,16 +290,8 @@ class Open:
       ]
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
-      # if not batch_first:
-      #   x = x.transpose(0, 1).contiguous()
-      for i, r in enumerate(self.resblocks):
-        # if compare:
-        #   a,b = x.numpy(),np.load(f"/home/tiny/weights_cache/clip/vision_resblock_in_{i}.npy")
-        #   print(f"| res{i:02d} | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-        #   x = Tensor(b)
+      for r in self.resblocks:
         x = r(x, attn_mask=attn_mask, transpose=True)
-      # if not batch_first:
-      #   x = x.transpose(0, 1)
       return x
 
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
@@ -351,19 +337,11 @@ class Open:
       x = self.class_embedding.reshape(1, 1, -1).expand(x.shape[0], 1, -1).cat(x, dim=1)
       x = x + self.positional_embedding
 
-      # x = Tensor(np.load("/home/tiny/weights_cache/clip/vision_transformer_x_2.npy"))
-
       x = self.ln_pre(x)
       x = self.transformer(x)
-
-      # a,b = x.numpy(),np.load("/home/tiny/weights_cache/clip/vision_transformer_x_3.npy")
-      # print(f"| transformer | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
-      # x = Tensor(b)
-
       x = self.ln_post(x)
 
       pooled = x[:, 0] @ self.proj
-
       return pooled
 
 
@@ -468,19 +446,13 @@ class OpenClipEncoder:
     x = self.ln_final(x)
     x = x[:, tokens.argmax(axis=-1)]
     x = x @ self.text_projection
-    return x.squeeze(0)
+    return x
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
-    image = Tensor(np.load("/home/tiny/weights_cache/clip/image_in.npy"))
-    image_features: Tensor = self.visual(image)#.unsqueeze(0))
-    a,b = image_features.numpy(),np.load("/home/tiny/weights_cache/clip/image_features.npy")
-    print(f"| img | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    image_features: Tensor = self.visual(image)
     image_features /= image_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
-    # tokens = Tensor(np.load("/home/tiny/weights_cache/clip/text_in.npy"))
-    text_features = self.encode_tokens(tokens)
-    a,b = text_features.numpy(),np.load("/home/tiny/weights_cache/clip/text_features.npy")
-    print(f"| txt | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
+    text_features = self.encode_tokens(tokens).squeeze(0)
     text_features /= text_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
     return image_features @ text_features.T
@@ -497,7 +469,8 @@ if __name__ == "__main__":
   text = "a horse sized cat eating a bagel"
 
   tokens = Tensor(tokenizer.encode(text, pad_with_zeros=True)).unsqueeze(0)
-  score = clip.get_clip_score(tokens, clip.prepare_image(im))
+  images = clip.prepare_image(im).unsqueeze(0)
+  score = clip.get_clip_score(tokens, images)
   print(score.numpy())
 
 if __name__ == "__main__":
