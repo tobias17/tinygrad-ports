@@ -239,7 +239,7 @@ class Open:
 
       self.in_proj_bias   = Tensor.empty(3*dims)
       self.in_proj_weight = Tensor.empty(3*dims, dims)
-      self.out_proj       = Linear(dims, dims)
+      self.out_proj = Linear(dims, dims)
 
     def __call__(self, x:Tensor, attn_mask:Optional[Tensor]=None) -> Tensor:
       T,B,C = x.shape
@@ -297,12 +297,12 @@ class Open:
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/model.py#L220
   # https://github.com/mlfoundations/open_clip/blob/58e4e39aaabc6040839b0d2a7e8bf20979e4558a/src/open_clip/transformer.py#L661
   class ClipTextTransformer:
-    def __init__(self, dims:int, n_heads:int, layers:int, vocab_size:int=49408, ctx_length:int=77):
-      self.token_embedding = Embedding(vocab_size, dims)
-      self.positional_embedding = Tensor.empty(ctx_length, dims)
-      self.transformer = Open.ClipTransformer(dims, layers, n_heads)
-      self.ln_final = LayerNorm(dims)
-      self.text_projection = Tensor.empty(dims, dims)
+    def __init__(self, width:int, n_heads:int, layers:int, vocab_size:int=49408, ctx_length:int=77):
+      self.token_embedding = Embedding(vocab_size, width)
+      self.positional_embedding = Tensor.empty(ctx_length, width)
+      self.transformer = Open.ClipTransformer(width, layers, n_heads)
+      self.ln_final = LayerNorm(width)
+      self.text_projection = Tensor.empty(width, width)
       self.attn_mask = Tensor.full((77, 77), float("-inf")).triu(1).realize()
 
     def __call__(self, text:Tensor) -> Tensor:
@@ -316,7 +316,7 @@ class Open:
       pooled = x[:, text.argmax(dim=-1)] @ self.text_projection
       return pooled
   
-  class VisionTransformer:
+  class ClipVisionTransformer:
     def __init__(self, width:int, layers:int, d_head:int, image_size:int, patch_size:int):
       grid_size = image_size // patch_size
       n_heads = width // d_head
@@ -358,6 +358,11 @@ class FrozenOpenClipEmbedder(Embedder):
   def tokenize(self, text:str, device:Optional[str]=None) -> Tensor:
     return Tensor(self.tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=device).reshape(1,-1)
 
+  def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
+    for r in self.model.transformer.resblocks:
+      x, penultimate = r(x, attn_mask=attn_mask), x
+    return x.permute(1, 0, 2), penultimate.permute(1, 0, 2)
+
   def embed_tokens(self, tokens:Tensor) -> Union[Tensor,Tuple[Tensor,...]]:
     x = self.model.token_embedding(tokens).add(self.model.positional_embedding).permute(1,0,2)
     x, penultimate = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
@@ -371,11 +376,6 @@ class FrozenOpenClipEmbedder(Embedder):
       return penultimate, pooled
     else:
       return penultimate
-
-  def text_transformer_forward(self, x:Tensor, attn_mask:Optional[Tensor]=None):
-    for r in self.model.transformer.resblocks:
-      x, penultimate = r(x, attn_mask=attn_mask), x
-    return x.permute(1,0,2), penultimate.permute(1,0,2)
 
   def __call__(self, text:str) -> Union[Tensor,Tuple[Tensor,...]]:
     tokens = self.tokenize(text)
@@ -396,7 +396,7 @@ clip_configs: Dict = {
       "width": 1024,
       "n_heads": 16,
       "layers": 24,
-      "context_length": 77,
+      "ctx_length": 77,
       "vocab_size": 49408,
     },
     "return_pooled": False,
@@ -406,9 +406,9 @@ clip_configs: Dict = {
 
 class OpenClipEncoder:
   def __init__(self, dims:int, text_cfg:Dict, vision_cfg:Dict, **_):
-    self.visual = Open.VisionTransformer(**vision_cfg)
+    self.visual = Open.ClipVisionTransformer(**vision_cfg)
 
-    text = Open.ClipTextTransformer(dims, text_cfg["n_heads"], text_cfg["layers"])
+    text = Open.ClipTextTransformer(**text_cfg)
     self.transformer = text.transformer
     self.token_embedding = text.token_embedding
     self.positional_embedding = text.positional_embedding
