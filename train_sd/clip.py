@@ -419,6 +419,15 @@ class OpenClipEncoder:
     self.mean = Tensor([0.48145466, 0.45782750, 0.40821073]).reshape(-1, 1, 1)
     self.std  = Tensor([0.26862954, 0.26130258, 0.27577711]).reshape(-1, 1, 1)
 
+  def load_from_pretrained(self):
+    # FIXME
+    # FIXME
+    # FIXME
+    state_dict = fetch("", "")
+    state_dict = torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin")
+    load_state_dict(self, state_dict, strict=False)
+    return self
+
   # TODO:
   # Should be doable in pure tinygrad, would just require some work and verification.
   # This is very desirable since it would allow for full generation->evaluation in a single JIT call.

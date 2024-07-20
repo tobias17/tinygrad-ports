@@ -13,6 +13,8 @@ import numpy as np
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
+from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
+from extra.models.inception import FidInceptionV3 # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
 # from inception import InceptionV3
@@ -134,7 +136,9 @@ if __name__ == "__main__":
 
   ##########################################
   sampler = DdimSampler()
-  # inception = InceptionV3()
+  inception = FidInceptionV3().load_from_pretrained()
+  clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
+  tokenizer = Tokenizer.ClipTokenizer()
 
   for entry in dataloader:
     # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
@@ -147,10 +151,25 @@ if __name__ == "__main__":
     # x = wrapper_model.first_stage_model.decoder(x)
     # x = (x + 1.0) / 2.0
     
-    x = Tensor.randn(1,3,512,512)
+    x = Tensor.rand(1,3,512,512)
 
-    # out = inception(x)
+
+
+    fid_score = inception(x).squeeze(3).squeeze(2)
+    print(f"fid_score:  {fid_score.mean().numpy()}")
+
+
+
+    im = Image.fromarray(x[0].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+    text = "a horse sized cat eating a bagel"
+
+    tokens = Tensor(tokenizer.encode(text, pad_with_zeros=True)).unsqueeze(0)
+    images = clip_enc.prepare_image(im).unsqueeze(0)
     
+    clip_score = clip_enc.get_clip_score(tokens, images)
+    print(f"clip_score: {clip_score.numpy()}")
+
+
 
     break
     # resp = input("next generation? ")
