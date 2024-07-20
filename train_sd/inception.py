@@ -5,6 +5,8 @@ from tinygrad.helpers import fetch # type: ignore
 
 from typing import Optional, Dict
 from functools import lru_cache
+from scipy import linalg
+import numpy as np
 
 # Base Inception Model
 
@@ -242,6 +244,9 @@ def default_fid():
   return torch_load(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth"))
 
 class FidInceptionV3:
+  m1: Optional[np.ndarray] = None
+  s1: Optional[np.ndarray] = None
+
   def __init__(self):
     inception = Inception3(cls_map={
       "A":  FidInceptionA,
@@ -284,6 +289,24 @@ class FidInceptionV3:
     x = x.interpolate((299,299), mode="linear")
     x = (x * 2) - 1
     return x.sequential(self.blocks)
+
+  def compute_score(self, inception_activations:Tensor):
+    if self.m1 is None or self.s1 is None:
+      with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
+        self.m1, self.s1 = f['mu'][:], f['sigma'][:]
+      assert self.m1 is not None and self.s1 is not None
+    
+    m2 = inception_activations.mean(axis=0).numpy()
+    s2 = np.cov(inception_activations.numpy(), rowvar=False) # FIXME: need to figure out how to do in pure tinygrad
+
+    return calculate_frechet_distance(self.m1, self.s1, m2, s2)
+
+def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
+  assert len(mu1.shape) >= 1 and mu1.shape == mu2.shape and len(sigma1.shape) >= 2 and sigma1.shape == sigma2.shape
+  diff = mu1 - mu2
+  covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+
+  return 0.0
 
 if __name__ == "__main__":
   model = FidInceptionV3()

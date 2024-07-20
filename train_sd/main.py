@@ -43,7 +43,7 @@ if __name__ == "__main__":
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
   # DEVICE_BS = 2
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [5]]
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
   DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
@@ -55,7 +55,7 @@ if __name__ == "__main__":
   wrapper_model = StableDiffusionV2(**params)
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
-  # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
+  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -141,21 +141,26 @@ if __name__ == "__main__":
   tokenizer = Tokenizer.ClipTokenizer()
 
   for entry in dataloader:
-    # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    # # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    # c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
-    # uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
-    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
+    uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
 
-    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-    # x = wrapper_model.first_stage_model.decoder(x)
-    # x = (x + 1.0) / 2.0
+    x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    x = wrapper_model.first_stage_model.decoder(x)
+    x = (x + 1.0) / 2.0
     
-    x = Tensor.rand(1,3,512,512)
+    x.realize()
+    print(f"Got out x sized {x.shape}")
+
+    # x = Tensor.rand(1,3,512,512)
 
 
 
-    fid_score = inception(x).squeeze(3).squeeze(2)
+    inception_act = inception(x).squeeze(3).squeeze(2)
+    
+
     print(f"fid_score:  {fid_score.mean().numpy()}")
 
 
@@ -169,7 +174,7 @@ if __name__ == "__main__":
     clip_score = clip_enc.get_clip_score(tokens, images)
     print(f"clip_score: {clip_score.numpy()}")
 
-
+    im.save("/tmp/rendered.png")
 
     break
     # resp = input("next generation? ")
