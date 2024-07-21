@@ -305,8 +305,19 @@ def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray
   assert len(mu1.shape) >= 1 and mu1.shape == mu2.shape and len(sigma1.shape) >= 2 and sigma1.shape == sigma2.shape
   diff = mu1 - mu2
   covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+  if not np.isfinite(covmean).all():
+    offset = np.eye(sigma1.shape[0]) * eps
+    covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
 
-  return 0.0
+  if np.iscomplexobj(covmean):
+    if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+      m = np.max(np.abs(covmean.imag))
+      raise ValueError(f"Imaginary component {m}")
+    covmean = covmean.real
+  
+  tr_covmean = np.trace(covmean)
+
+  return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
 
 if __name__ == "__main__":
   model = FidInceptionV3()
