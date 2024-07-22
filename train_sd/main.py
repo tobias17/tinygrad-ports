@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import time, os, datetime, math
 from typing import Dict, Tuple
 from PIL import Image
+import pandas as pd # type: ignore
 import numpy as np
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
@@ -140,45 +141,40 @@ if __name__ == "__main__":
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
   tokenizer = Tokenizer.ClipTokenizer()
 
-  for entry in dataloader:
-    # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    # # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    # c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
-    # uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
-    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+  i = 0
+  df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
+  captions = df["caption"].array
+  inception_activations = []
+  while i < len(df):
+    texts = captions[i:i+GLOBAL_BS]
+    tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
-    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-    # x = wrapper_model.first_stage_model.decoder(x)
-    # x = (x + 1.0) / 2.0
+    c  = tokenize_step(Tensor.cat(*tokens))
+    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+
+    x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    x = wrapper_model.first_stage_model.decoder(x)
+    x = (x + 1.0) / 2.0
     
-    # x.realize()
+    x.realize()
     # print(f"Got out x sized {x.shape}")
 
-    x = Tensor.rand(1,3,512,512)
+    inception_activations.append(inception(x).squeeze(3).squeeze(2))
 
-
-
-    inception_act = inception(x).squeeze(3).squeeze(2).expand(2048,2048)
-    fid_score = inception.compute_score(inception_act)
-    print(f"fid_score:  {fid_score}")
-
-
-
-    im = Image.fromarray(x[0].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
-    text = "a horse sized cat eating a bagel"
-
-    tokens = Tensor(tokenizer.encode(text, pad_with_zeros=True)).unsqueeze(0)
-    images = clip_enc.prepare_image(im).unsqueeze(0)
-    
+    images_ = []
+    for j in range(c.shape[0]):
+      im = Image.fromarray(x[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+      images_.append(clip_enc.prepare_image(im).unsqueeze(0))
+    images = Tensor.cat(*images_, dim=0)
     clip_score = clip_enc.get_clip_score(tokens, images)
     print(f"clip_score: {clip_score.numpy()}")
 
     im.save("/tmp/rendered.png")
 
-    break
-    # resp = input("next generation? ")
-    # if resp.strip().lower().startswith("q"):
-    #   assert False
+  inception_act = Tensor.cat(*inception_activations, dim=0)
+  fid_score = inception.compute_score(inception_act)
+  print(f"fid_score:  {fid_score}")
   ##########################################
 
 
