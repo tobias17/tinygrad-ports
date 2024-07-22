@@ -42,7 +42,7 @@ class DdimSampler:
       pred_x0 =   sqrt_alphas_cumprod          .gather(-1, tms).reshape(shape) * x_t \
                 - sqrt_one_minus_alphas_cumprod.gather(-1, tms).reshape(shape) * output
 
-      a_prev = alphas_prev[index].reshape(batch_size,1,1,1)
+      a_prev = alphas_prev[index].reshape(1,1,1,1)
       dir_xt = (1.0 - a_prev).sqrt() * e_t
       x_t = (a_prev.sqrt() * pred_x0 + dir_xt).realize()
 

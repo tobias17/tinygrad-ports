@@ -149,25 +149,27 @@ if __name__ == "__main__":
     texts = captions[i:i+GLOBAL_BS]
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
-    c  = tokenize_step(Tensor.cat(*tokens))
-    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    # c  = tokenize_step(Tensor.cat(*tokens))
+    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
 
-    x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-    x = wrapper_model.first_stage_model.decoder(x)
-    x = (x + 1.0) / 2.0
+    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    # x = wrapper_model.first_stage_model.decoder(x)
+    # x = (x + 1.0) / 2.0
     
-    x.realize()
-    # print(f"Got out x sized {x.shape}")
+    # x.realize()
+    # # print(f"Got out x sized {x.shape}")
+
+    x = Tensor.randn(GLOBAL_BS,3,512,512)
 
     inception_activations.append(inception(x).squeeze(3).squeeze(2))
 
     images_ = []
-    for j in range(c.shape[0]):
+    for j in range(GLOBAL_BS):
       im = Image.fromarray(x[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
       images_.append(clip_enc.prepare_image(im).unsqueeze(0))
     images = Tensor.cat(*images_, dim=0)
-    clip_score = clip_enc.get_clip_score(tokens, images)
+    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
     print(f"clip_score: {clip_score.numpy()}")
 
     im.save("/tmp/rendered.png")
