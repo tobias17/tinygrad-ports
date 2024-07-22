@@ -14,7 +14,7 @@ from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_s
 
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
-from extra.models.inception import FidInceptionV3 # type: ignore
+from inception import FidInceptionV3 # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
 # from inception import InceptionV3
@@ -55,7 +55,7 @@ if __name__ == "__main__":
   wrapper_model = StableDiffusionV2(**params)
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
-  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
+  # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -141,27 +141,26 @@ if __name__ == "__main__":
   tokenizer = Tokenizer.ClipTokenizer()
 
   for entry in dataloader:
-    # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
-    uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    # # c  = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+    # # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    # c  = tokenize_step(wrapper_model.cond_stage_model.tokenize("a horse sized cat eating a bagel"))
+    # uc = tokenize_step(wrapper_model.cond_stage_model.tokenize(""))
+    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
 
-    x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-    x = wrapper_model.first_stage_model.decoder(x)
-    x = (x + 1.0) / 2.0
+    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    # x = wrapper_model.first_stage_model.decoder(x)
+    # x = (x + 1.0) / 2.0
     
-    x.realize()
-    print(f"Got out x sized {x.shape}")
+    # x.realize()
+    # print(f"Got out x sized {x.shape}")
 
-    # x = Tensor.rand(1,3,512,512)
+    x = Tensor.rand(1,3,512,512)
 
 
 
-    inception_act = inception(x).squeeze(3).squeeze(2)
-    
-
-    print(f"fid_score:  {fid_score.mean().numpy()}")
+    inception_act = inception(x).squeeze(3).squeeze(2).expand(2048,2048)
+    fid_score = inception.compute_score(inception_act)
+    print(f"fid_score:  {fid_score}")
 
 
 

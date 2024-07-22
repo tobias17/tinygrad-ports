@@ -5,7 +5,7 @@ from tinygrad.helpers import fetch # type: ignore
 
 from typing import Optional, Dict
 from functools import lru_cache
-from scipy import linalg
+from scipy import linalg # type: ignore
 import numpy as np
 
 # Base Inception Model
@@ -254,43 +254,65 @@ class FidInceptionV3:
       "E1": FidInceptionE1,
       "E2": FidInceptionE2,
     })
-    state_dict = default_fid()
+
+    self.Conv2d_1a_3x3 = inception.Conv2d_1a_3x3
+    self.Conv2d_2a_3x3 = inception.Conv2d_2a_3x3
+    self.Conv2d_2b_3x3 = inception.Conv2d_2b_3x3
+
+    self.Conv2d_3b_1x1 = inception.Conv2d_3b_1x1
+    self.Conv2d_4a_3x3 = inception.Conv2d_4a_3x3
+
+    self.Mixed_5b = inception.Mixed_5b
+    self.Mixed_5c = inception.Mixed_5c
+    self.Mixed_5d = inception.Mixed_5d
+    self.Mixed_6a = inception.Mixed_6a
+    self.Mixed_6b = inception.Mixed_6b
+    self.Mixed_6c = inception.Mixed_6c
+    self.Mixed_6d = inception.Mixed_6d
+    self.Mixed_6e = inception.Mixed_6e
+
+    self.Mixed_7a = inception.Mixed_7a
+    self.Mixed_7b = inception.Mixed_7b
+    self.Mixed_7c = inception.Mixed_7c
+
+  def load_from_pretrained(self):
+    state_dict = torch_load(str(fetch("https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth", "pt_inception-2015-12-05-6726825d.pth")))
     for k,v in state_dict.items():
       if k.endswith(".num_batches_tracked"):
         state_dict[k] = v.reshape(1)
-    load_state_dict(inception, state_dict)
-
-    self.blocks = [
-      inception.Conv2d_1a_3x3,
-      inception.Conv2d_2a_3x3,
-      inception.Conv2d_2b_3x3,
-      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
-
-      inception.Conv2d_3b_1x1,
-      inception.Conv2d_4a_3x3,
-      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
-
-      inception.Mixed_5b,
-      inception.Mixed_5c,
-      inception.Mixed_5d,
-      inception.Mixed_6a,
-      inception.Mixed_6b,
-      inception.Mixed_6c,
-      inception.Mixed_6d,
-      inception.Mixed_6e,
-
-      inception.Mixed_7a,
-      inception.Mixed_7b,
-      inception.Mixed_7c,
-      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
-    ]
+    load_state_dict(self, state_dict)
+    return self
 
   def __call__(self, x:Tensor) -> Tensor:
     x = x.interpolate((299,299), mode="linear")
     x = (x * 2) - 1
-    return x.sequential(self.blocks)
+    x = x.sequential([
+      self.Conv2d_1a_3x3,
+      self.Conv2d_2a_3x3,
+      self.Conv2d_2b_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
 
-  def compute_score(self, inception_activations:Tensor):
+      self.Conv2d_3b_1x1,
+      self.Conv2d_4a_3x3,
+      lambda x: Tensor.max_pool2d(x, kernel_size=(3,3), stride=2, dilation=1),
+
+      self.Mixed_5b,
+      self.Mixed_5c,
+      self.Mixed_5d,
+      self.Mixed_6a,
+      self.Mixed_6b,
+      self.Mixed_6c,
+      self.Mixed_6d,
+      self.Mixed_6e,
+
+      self.Mixed_7a,
+      self.Mixed_7b,
+      self.Mixed_7c,
+      lambda x: Tensor.avg_pool2d(x, kernel_size=(8,8)),
+    ])
+    return x
+
+  def compute_score(self, inception_activations:Tensor) -> float:
     if self.m1 is None or self.s1 is None:
       with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
         self.m1, self.s1 = f['mu'][:], f['sigma'][:]
@@ -302,7 +324,12 @@ class FidInceptionV3:
     return calculate_frechet_distance(self.m1, self.s1, m2, s2)
 
 def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
-  assert len(mu1.shape) >= 1 and mu1.shape == mu2.shape and len(sigma1.shape) >= 2 and sigma1.shape == sigma2.shape
+  mu1 = np.atleast_1d(mu1)
+  mu2 = np.atleast_1d(mu2)
+  sigma1 = np.atleast_2d(sigma1)
+  sigma2 = np.atleast_2d(sigma2)
+  assert mu1.shape == mu2.shape and sigma1.shape == sigma2.shape
+
   diff = mu1 - mu2
   covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
   if not np.isfinite(covmean).all():
