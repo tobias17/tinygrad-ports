@@ -1,6 +1,7 @@
 from tinygrad import Tensor, dtypes # type: ignore
 from tinygrad.helpers import fetch # type: ignore
 from tinygrad.nn import Linear, LayerNorm, Embedding, Conv2d # type: ignore
+from tinygrad.nn.state import torch_load, load_state_dict # type: ignore
 
 from typing import List, Optional, Union, Tuple, Dict
 from abc import ABC, abstractmethod
@@ -423,7 +424,7 @@ class OpenClipEncoder:
     # FIXME
     # FIXME
     # FIXME
-    state_dict = fetch("", "")
+    # state_dict = fetch("", "")
     state_dict = torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin")
     load_state_dict(self, state_dict, strict=False)
     return self
@@ -453,15 +454,19 @@ class OpenClipEncoder:
     x = x + self.positional_embedding
     x = self.transformer(x, attn_mask=self.attn_mask)
     x = self.ln_final(x)
-    x = x[:, tokens.argmax(axis=-1)]
-    x = x @ self.text_projection
+    am = tokens.argmax(axis=-1)
+    am2 = am.unsqueeze(-1).unsqueeze(-1).expand(x.shape[0],1,x.shape[-1])
+    g = x.gather(0, am2).squeeze(1)
+    # pooled = x.gather(0, am.reshape(tokens.shape[0],1).expand(tokens.shape[0],x.shape[-1]))
+    x = g @ self.text_projection
     return x
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
     image_features: Tensor = self.visual(image)
     image_features /= image_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
-    text_features = self.encode_tokens(tokens).squeeze(0)
+    text_features = self.encode_tokens(tokens)
+    otf = text_features
     text_features /= text_features.square().sum([-1,-2], keepdim=True).sqrt() # Frobenius Norm
 
     return image_features @ text_features.T

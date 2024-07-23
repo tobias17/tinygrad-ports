@@ -14,7 +14,7 @@ import numpy as np
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
 from extra.models.unet import UNetModel, timestep_embedding # type: ignore
-from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
+from clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
