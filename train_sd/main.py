@@ -172,7 +172,8 @@ if __name__ == "__main__":
     clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
     print(f"clip_score: {clip_score.numpy()}")
 
-    im.save("/tmp/rendered.png")
+    # im.save("/tmp/rendered.png")
+    assert False
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)

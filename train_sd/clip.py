@@ -456,9 +456,12 @@ class OpenClipEncoder:
     x = self.ln_final(x)
     am = tokens.argmax(axis=-1)
     am2 = am.unsqueeze(-1).unsqueeze(-1).expand(x.shape[0],1,x.shape[-1])
-    g = x.gather(0, am2).squeeze(1)
+    print(f"am2: {am2.mean().numpy()}")
+    g = x.gather(1, am2).squeeze(1)
+    print(f"g: {g.mean().numpy()}")
     # pooled = x.gather(0, am.reshape(tokens.shape[0],1).expand(tokens.shape[0],x.shape[-1]))
     x = g @ self.text_projection
+    print(f"x: {x.mean().numpy()}")
     return x
 
   def get_clip_score(self, tokens:Tensor, image:Tensor) -> Tensor:
