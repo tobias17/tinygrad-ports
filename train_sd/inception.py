@@ -347,12 +347,13 @@ def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray
   return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
 
 if __name__ == "__main__":
-  model = FidInceptionV3()
+  model = FidInceptionV3().load_from_pretrained()
 
   import numpy as np
   x = Tensor(np.load("/home/tiny/weights_cache/inception/input_x.npy")).permute(2, 0, 1).unsqueeze(0)
 
   z = model(x)
+  print(f"z.shape: {z.shape}")
 
   a,b = z.numpy(),np.load("/home/tiny/weights_cache/inception/output_z.npy")
   print(f"| z | {np.mean(np.abs(a-b)):.4f} | {np.mean(np.abs(a)):.4f} | {np.mean(np.abs(b)):.4f} |")
