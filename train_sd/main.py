@@ -170,7 +170,7 @@ if __name__ == "__main__":
       images_.append(clip_enc.prepare_image(im).unsqueeze(0))
     images = Tensor.cat(*images_, dim=0)
     clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
-    print(f"clip_score: {clip_score.numpy()}")
+    print(f"clip_score: {clip_score.mean().numpy()}")
 
     # im.save("/tmp/rendered.png")
     # assert False

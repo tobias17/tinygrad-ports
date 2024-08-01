@@ -349,7 +349,6 @@ def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray
 if __name__ == "__main__":
   model = FidInceptionV3().load_from_pretrained()
 
-  import numpy as np
   x = Tensor(np.load("/home/tiny/weights_cache/inception/input_x.npy")).permute(2, 0, 1).unsqueeze(0)
 
   z = model(x)
