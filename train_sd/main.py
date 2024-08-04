@@ -48,6 +48,7 @@ if __name__ == "__main__":
   DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
+  EVAL_BS = 6
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
@@ -145,40 +146,44 @@ if __name__ == "__main__":
   df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
   captions = df["caption"].array
   inception_activations = []
-  while i < len(df):
-    texts = captions[i:i+GLOBAL_BS]
+
+  Tensor.no_grad = True
+  while i < EVAL_BS*5: #len(df):
+    texts = captions[i:i+EVAL_BS]
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
-    # c  = tokenize_step(Tensor.cat(*tokens))
-    # uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
-    # z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    c  = tokenize_step(Tensor.cat(*tokens))
+    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
 
-    # x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-    # x = wrapper_model.first_stage_model.decoder(x)
-    # x = (x + 1.0) / 2.0
+    x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+    x = wrapper_model.first_stage_model.decoder(x)
+    x = (x + 1.0) / 2.0
     
-    # x.realize()
+    x.realize()
     # # print(f"Got out x sized {x.shape}")
 
-    x = Tensor.randn(GLOBAL_BS,3,512,512)
+    # x = Tensor.randn(EVAL_BS,3,512,512)
 
-    inception_activations.append(inception(x).squeeze(3).squeeze(2))
+    inception_activations.append(inception(x).squeeze(3).squeeze(2).realize())
 
-    images_ = []
-    for j in range(GLOBAL_BS):
-      im = Image.fromarray(x[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
-      images_.append(clip_enc.prepare_image(im).unsqueeze(0))
-    images = Tensor.cat(*images_, dim=0)
-    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
-    print(f"clip_score: {clip_score.mean().numpy()}")
+    # images_ = []
+    # for j in range(EVAL_BS):
+    #   im = Image.fromarray(x[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+    #   images_.append(clip_enc.prepare_image(im).unsqueeze(0))
+    # images = Tensor.cat(*images_, dim=0)
+    # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
+    # print(f"clip_score: {clip_score.mean().numpy()}")
 
     # im.save("/tmp/rendered.png")
     # assert False
-    break
+
+    i += EVAL_BS
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
   print(f"fid_score:  {fid_score}")
+  Tensor.no_grad = None
   ##########################################
 
 
