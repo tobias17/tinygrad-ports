@@ -41,23 +41,27 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  # DEVICE_BS = 2
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [0,1,2,3,4,5]]
+  DEVICE_BS = 2
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 1
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  # DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-  EVAL_BS = 6
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
+
+  EVAL_DEVICE_BS = 6
+  EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
 
   wrapper_model = StableDiffusionV2(**params)
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
-  # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
+  load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
+  for w in get_state_dict(wrapper_model).values():
+    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -100,16 +104,16 @@ if __name__ == "__main__":
 
   @TinyJit
   def train_step(x:Tensor, x_noisy:Tensor, t_emb:Tensor, c:Tensor) -> Tensor:
-    Tensor.training = True
+    with Tensor.training():
 
-    output = model(x_noisy, t_emb, c)
+      output = model(x_noisy, t_emb, c)
 
-    loss = (x - output).square().mean()
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+      loss = (x - output).square().mean()
+      optimizer.zero_grad()
+      loss.backward()
+      optimizer.step()
 
-    return loss.realize()
+      return loss.realize()
 
   @TinyJit
   def tokenize_step(tokens:Tensor) -> Tensor:
@@ -139,6 +143,8 @@ if __name__ == "__main__":
   ##########################################
   sampler = DdimSampler()
   inception = FidInceptionV3().load_from_pretrained()
+  for w in get_state_dict(inception).values():
+    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
   tokenizer = Tokenizer.ClipTokenizer()
 
@@ -148,12 +154,17 @@ if __name__ == "__main__":
   inception_activations = []
 
   Tensor.no_grad = True
-  while i < EVAL_BS*5: #len(df):
-    texts = captions[i:i+EVAL_BS]
-    tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
+  while i < EVAL_GLOBAL_BS*5: #len(df):
+    texts = captions[i:i+EVAL_GLOBAL_BS]
 
-    c  = tokenize_step(Tensor.cat(*tokens))
-    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])))
+    tokens_py = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
+    tokens_tg = Tensor.cat(*tokens_py).shard(GPUS, axis=0)
+    c = tokenize_step(tokens_tg.realize())
+
+    uncond_py = wrapper_model.cond_stage_model.tokenize("")
+    uncond_tg = Tensor.cat(*([uncond_py]*c.shape[0])).shard(GPUS, axis=0)
+    uc = tokenize_step(uncond_tg.realize())
+
     z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
@@ -178,7 +189,7 @@ if __name__ == "__main__":
     # im.save("/tmp/rendered.png")
     # assert False
 
-    i += EVAL_BS
+    i += EVAL_GLOBAL_BS
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
