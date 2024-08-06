@@ -41,17 +41,17 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [0,1,2,3,4,5]]
-  DEVICE_BS = 2
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [0,1,2,3,4,5]]
+  # DEVICE_BS = 2
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  # DEVICE_BS = 1
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 6
+  EVAL_DEVICE_BS = 2
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -60,8 +60,9 @@ if __name__ == "__main__":
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
   load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
-  for w in get_state_dict(wrapper_model).values():
-    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  for k,w in get_state_dict(wrapper_model).items():
+    if k.startswith("model."):
+      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -115,7 +116,7 @@ if __name__ == "__main__":
 
       return loss.realize()
 
-  @TinyJit
+  # @TinyJit
   def tokenize_step(tokens:Tensor) -> Tensor:
     return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
 
@@ -156,16 +157,12 @@ if __name__ == "__main__":
   Tensor.no_grad = True
   while i < EVAL_GLOBAL_BS*5: #len(df):
     texts = captions[i:i+EVAL_GLOBAL_BS]
+    tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
-    tokens_py = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
-    tokens_tg = Tensor.cat(*tokens_py).shard(GPUS, axis=0)
-    c = tokenize_step(tokens_tg.realize())
+    c  = tokenize_step(Tensor.cat(*tokens).realize()).shard(GPUS, axis=0)
+    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()).shard(GPUS, axis=0)
 
-    uncond_py = wrapper_model.cond_stage_model.tokenize("")
-    uncond_tg = Tensor.cat(*([uncond_py]*c.shape[0])).shard(GPUS, axis=0)
-    uc = tokenize_step(uncond_tg.realize())
-
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10)
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10, shard_fnx=(lambda x: x.shard(GPUS, axis=0)))
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
