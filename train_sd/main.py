@@ -51,7 +51,7 @@ if __name__ == "__main__":
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 2
+  EVAL_DEVICE_BS = 10
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -155,7 +155,7 @@ if __name__ == "__main__":
   inception_activations = []
 
   Tensor.no_grad = True
-  while i < EVAL_DEVICE_BS*5: #len(df):
+  while i < len(df):
     texts = captions[i:i+EVAL_DEVICE_BS]
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
@@ -187,6 +187,7 @@ if __name__ == "__main__":
     # assert False
 
     i += EVAL_DEVICE_BS
+    print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)})")
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
