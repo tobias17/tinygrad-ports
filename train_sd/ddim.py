@@ -30,10 +30,10 @@ class DdimSampler:
 
       index = num_steps - i - 1
       tms = Tensor.full((batch_size,), int(step))
-      t_emb = shard_fnx(timestep_embedding(tms, 320).realize())
+      # t_emb = shard_fnx(timestep_embedding(tms, 320).realize())
 
       def fp16r(z): return z.cast(dtypes.float16).realize()
-      latent_uc, latent_c = run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(t_emb,t_emb)), fp16r(Tensor.cat(uc,c))).chunk(2)
+      latent_uc, latent_c = run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(tms,tms)), fp16r(Tensor.cat(uc,c))).chunk(2)
       output = latent_uc + cfg_scale * (latent_c - latent_uc)
 
       shape = (batch_size, 1, 1, 1)

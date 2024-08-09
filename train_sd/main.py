@@ -60,9 +60,9 @@ if __name__ == "__main__":
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
   load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
-  for k,w in get_state_dict(wrapper_model).items():
-    if k.startswith("model."):
-      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  # for k,w in get_state_dict(wrapper_model).items():
+  #   if k.startswith("model."):
+  #     w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -144,8 +144,8 @@ if __name__ == "__main__":
   ##########################################
   sampler = DdimSampler()
   inception = FidInceptionV3().load_from_pretrained()
-  for w in get_state_dict(inception).values():
-    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  # for w in get_state_dict(inception).values():
+  #   w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
   tokenizer = Tokenizer.ClipTokenizer()
 
@@ -155,14 +155,14 @@ if __name__ == "__main__":
   inception_activations = []
 
   Tensor.no_grad = True
-  while i < EVAL_GLOBAL_BS*5: #len(df):
-    texts = captions[i:i+EVAL_GLOBAL_BS]
+  while i < EVAL_DEVICE_BS*5: #len(df):
+    texts = captions[i:i+EVAL_DEVICE_BS]
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
-    c  = tokenize_step(Tensor.cat(*tokens).realize()).shard(GPUS, axis=0)
-    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()).shard(GPUS, axis=0)
+    c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
+    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
 
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10, shard_fnx=(lambda x: x.shard(GPUS, axis=0)))
+    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10) #, shard_fnx=(lambda x: x.shard(GPUS, axis=0)))
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
@@ -186,7 +186,7 @@ if __name__ == "__main__":
     # im.save("/tmp/rendered.png")
     # assert False
 
-    i += EVAL_GLOBAL_BS
+    i += EVAL_DEVICE_BS
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
