@@ -41,11 +41,11 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  # DEVICE_BS = 2
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  DEVICE_BS = 2
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 1
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  # DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
       return loss.realize()
 
-  # @TinyJit
+  @TinyJit
   def tokenize_step(tokens:Tensor) -> Tensor:
     return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
 
@@ -173,27 +173,19 @@ if __name__ == "__main__":
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
     x = (x + 1.0) / 2.0
-    
     x.realize()
-    # # print(f"Got out x sized {x.shape}")
-
-    # x = Tensor.randn(EVAL_BS,3,512,512)
 
     inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
-
     if len(inception_activations) > 20:
       inception_activations = [Tensor.cat(*inception_activations)]
 
-    # images_ = []
-    # for j in range(EVAL_BS):
-    #   im = Image.fromarray(x[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
-    #   images_.append(clip_enc.prepare_image(im).unsqueeze(0))
-    # images = Tensor.cat(*images_, dim=0)
-    # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), images)
-    # print(f"clip_score: {clip_score.mean().numpy()}")
-
-    # im.save("/tmp/rendered.png")
-    # assert False
+    images = []
+    x_clip = x.to(Device.DEFAULT).realize()
+    for j in range(EVAL_GLOBAL_BS):
+      im = Image.fromarray(x_clip[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+      images.append(clip_enc.prepare_image(im).unsqueeze(0))
+    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), Tensor.cat(*images, dim=0))
+    print(f"clip_score: {clip_score.mean().numpy()}")
 
     i += EVAL_GLOBAL_BS
     print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)})")
