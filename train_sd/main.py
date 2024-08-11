@@ -51,7 +51,7 @@ if __name__ == "__main__":
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 2
+  EVAL_DEVICE_BS = 15
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -60,9 +60,9 @@ if __name__ == "__main__":
   # del wrapper_model.model
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
   load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
-  # for k,w in get_state_dict(wrapper_model).items():
-  #   if k.startswith("model."):
-  #     w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  for k,w in get_state_dict(wrapper_model).items():
+    if k.startswith("first_stage_model."):
+      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
   for w in get_state_dict(model).values():
@@ -144,8 +144,8 @@ if __name__ == "__main__":
   ##########################################
   sampler = DdimSampler()
   inception = FidInceptionV3().load_from_pretrained()
-  # for w in get_state_dict(inception).values():
-  #   w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  for w in get_state_dict(inception).values():
+    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
   tokenizer = Tokenizer.ClipTokenizer()
 
@@ -153,6 +153,8 @@ if __name__ == "__main__":
   df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
   captions = df["caption"].array
   inception_activations = []
+
+  assert len(df) % EVAL_GLOBAL_BS == 0, f"eval dataset size ({len(df)}) must be divisible by the EVAL_GLOBAL_BS ({EVAL_GLOBAL_BS})"
 
   Tensor.no_grad = True
   while i < len(df):
@@ -163,10 +165,10 @@ if __name__ == "__main__":
     uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
 
     z = sampler.sample(
-      model, c.shape[0], c, uc, num_steps=10, 
+      model, c.shape[0], c, uc, num_steps=2,
       shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
       all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
-    ).to(Device.DEFAULT)
+    )
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
