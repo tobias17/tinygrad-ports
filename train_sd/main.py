@@ -41,11 +41,11 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  # DEVICE_BS = 2
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  DEVICE_BS = 2
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  DEVICE_BS = 1
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  # DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
@@ -160,6 +160,8 @@ if __name__ == "__main__":
   def run_inc_and_clip(x:Tensor, tokens:Tensor, images:Tensor) -> Tuple[Tensor,Tensor]:
     return inception(x).realize(), clip_enc.get_clip_score(tokens, images).realize()
 
+  wall_time_start = time.time()
+
   Tensor.no_grad = True
   while i < len(df):
     texts = captions[i:i+EVAL_GLOBAL_BS]
@@ -200,7 +202,16 @@ if __name__ == "__main__":
     print(f"clip_score: {clip_out.mean().numpy():.5f}")
 
     i += EVAL_GLOBAL_BS
-    print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)})")
+
+    def smart_print(sec:float) -> str:
+      if sec < 60: return f"{sec:.0f} sec"
+      mins = sec / 60.0
+      if mins < 60: return f"{mins:.1f} mins"
+      hours = mins / 60.0
+      return f"{hours:.1f} hours"
+    wall_time_delta = time.time() - wall_time_start
+    eta_time = (wall_time_delta / (i / len(df))) - wall_time_delta
+    print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)}), elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
