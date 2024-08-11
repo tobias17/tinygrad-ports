@@ -41,11 +41,11 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  DEVICE_BS = 2
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  # DEVICE_BS = 2
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  # DEVICE_BS = 1
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
@@ -156,6 +156,10 @@ if __name__ == "__main__":
 
   assert len(df) % EVAL_GLOBAL_BS == 0, f"eval dataset size ({len(df)}) must be divisible by the EVAL_GLOBAL_BS ({EVAL_GLOBAL_BS})"
 
+  @TinyJit
+  def run_inc_and_clip(x:Tensor, tokens:Tensor, images:Tensor) -> Tuple[Tensor,Tensor]:
+    return inception(x).realize(), clip_enc.get_clip_score(tokens, images).realize()
+
   Tensor.no_grad = True
   while i < len(df):
     texts = captions[i:i+EVAL_GLOBAL_BS]
@@ -165,7 +169,7 @@ if __name__ == "__main__":
     uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
 
     z = sampler.sample(
-      model, c.shape[0], c, uc, num_steps=2,
+      model, c.shape[0], c, uc, num_steps=50,
       shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
       all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
     )
@@ -175,17 +179,25 @@ if __name__ == "__main__":
     x = (x + 1.0) / 2.0
     x.realize()
 
-    inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
-    if len(inception_activations) > 20:
-      inception_activations = [Tensor.cat(*inception_activations)]
+    # inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+    # if len(inception_activations) > 20:
+    #   inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
 
     images = []
     x_clip = x.to(Device.DEFAULT).realize()
     for j in range(EVAL_GLOBAL_BS):
       im = Image.fromarray(x_clip[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
       images.append(clip_enc.prepare_image(im).unsqueeze(0))
-    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0), Tensor.cat(*images, dim=0))
-    print(f"clip_score: {clip_score.mean().numpy()}")
+    # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+    # print(f"clip_score: {clip_score.mean().numpy():.5f}")
+
+    inc_out, clip_out = run_inc_and_clip(x.realize(), Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+
+    inception_activations.append(inc_out.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+    if len(inception_activations) > 20:
+      inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
+
+    print(f"clip_score: {clip_out.mean().numpy():.5f}")
 
     i += EVAL_GLOBAL_BS
     print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)})")
