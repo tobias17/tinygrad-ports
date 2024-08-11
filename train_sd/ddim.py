@@ -11,15 +11,17 @@ class DdimSampler:
   def __init__(self):
     pass
 
-  def sample(self, model, batch_size:int, c:Tensor, uc:Tensor, num_steps:int=50, cfg_scale:float=8.0, shard_fnx=(lambda x: x), gather_fnx=(lambda x: x)) -> Tensor:
+  def sample(self, model, batch_size:int, c:Tensor, uc:Tensor, num_steps:int=50, cfg_scale:float=8.0, shard_fnx=(lambda x: x), all_fnx=(lambda x: x)) -> Tensor:
     ddim_timesteps = np.arange(1, TOTAL_STEPS+1, TOTAL_STEPS//num_steps)
     
-    alphas_cumprod = get_alphas_cumprod()
-    sqrt_alphas_cumprod = alphas_cumprod.sqrt()
+    alphas_cumprod                = get_alphas_cumprod()
+    sqrt_alphas_cumprod           = alphas_cumprod.sqrt()
     sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
-    alphas_prev = Tensor.cat(alphas_cumprod[:1], alphas_cumprod[Tensor(ddim_timesteps[:-1])])
+    alphas_prev                   = Tensor.cat(alphas_cumprod[:1], alphas_cumprod[Tensor(ddim_timesteps[:-1])])
 
-    x_t = Tensor.randn(batch_size, 4, 64, 64)
+    all_fnx(alphas_cumprod), all_fnx(sqrt_alphas_cumprod), all_fnx(sqrt_one_minus_alphas_cumprod), all_fnx(alphas_prev)
+
+    x_t = shard_fnx(Tensor.randn(batch_size, 4, 64, 64))
     time_range = np.flip(ddim_timesteps)
 
     @TinyJit
@@ -32,8 +34,12 @@ class DdimSampler:
       tms = Tensor.full((batch_size,), int(step))
       t_emb = timestep_embedding(tms, 320).realize()
 
-      def fp16r(z): return shard_fnx(z.cast(dtypes.float16)).realize()
-      latent_uc, latent_c = gather_fnx(run(model, fp16r(Tensor.cat(x_t,x_t)), fp16r(Tensor.cat(t_emb,t_emb)), fp16r(Tensor.cat(uc,c)))).chunk(2)
+      def fp16r(z): return z.cast(dtypes.float16).realize()
+      x_t, t_emb = fp16r(x_t), fp16r(shard_fnx(t_emb))
+
+      # TODO: this should be doable with the cat batch and chunk approach, just need to be clever with sharding
+      latent_uc = run(model, x_t, t_emb, fp16r(shard_fnx(uc)))
+      latent_c  = run(model, x_t, t_emb, fp16r(shard_fnx(c )))
       output = latent_uc + cfg_scale * (latent_c - latent_uc)
 
       shape = (batch_size, 1, 1, 1)
@@ -47,3 +53,4 @@ class DdimSampler:
       x_t = (a_prev.sqrt() * pred_x0 + dir_xt).realize()
 
     return x_t
+  

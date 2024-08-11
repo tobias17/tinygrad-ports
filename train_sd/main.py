@@ -162,7 +162,11 @@ if __name__ == "__main__":
     c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
     uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
 
-    z = sampler.sample(model, c.shape[0], c, uc, num_steps=10, shard_fnx=(lambda x: x.shard(GPUS, axis=0)), gather_fnx=(lambda x: x.to(Device.DEFAULT)))
+    z = sampler.sample(
+      model, c.shape[0], c, uc, num_steps=10, 
+      shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
+      all_fnx=(lambda x: x.shard_(GPUS, axis=None)),
+    ).to(Device.DEFAULT)
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
