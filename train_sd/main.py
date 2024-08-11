@@ -165,7 +165,7 @@ if __name__ == "__main__":
     z = sampler.sample(
       model, c.shape[0], c, uc, num_steps=10, 
       shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
-      all_fnx=(lambda x: x.shard_(GPUS, axis=None)),
+      all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
     ).to(Device.DEFAULT)
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
