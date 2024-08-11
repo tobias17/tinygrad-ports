@@ -13,7 +13,7 @@ import numpy as np
 
 from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
 
-from extra.models.unet import UNetModel, timestep_embedding # type: ignore
+from unet import UNetModel, timestep_embedding # type: ignore
 from clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
 from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [0,1,2,3,4,5]]
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
   # DEVICE_BS = 2
 
   GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
@@ -51,7 +51,7 @@ if __name__ == "__main__":
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 10
+  EVAL_DEVICE_BS = 2
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -156,13 +156,13 @@ if __name__ == "__main__":
 
   Tensor.no_grad = True
   while i < len(df):
-    texts = captions[i:i+EVAL_DEVICE_BS]
+    texts = captions[i:i+EVAL_GLOBAL_BS]
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
 
     c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
     uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
 
-    z = sampler.sample(wrapper_model.model.diffusion_model, c.shape[0], c, uc, num_steps=10) #, shard_fnx=(lambda x: x.shard(GPUS, axis=0)))
+    z = sampler.sample(model, c.shape[0], c, uc, num_steps=10, shard_fnx=(lambda x: x.shard(GPUS, axis=0)), gather_fnx=(lambda x: x.to(Device.DEFAULT)))
 
     x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
     x = wrapper_model.first_stage_model.decoder(x)
@@ -173,7 +173,10 @@ if __name__ == "__main__":
 
     # x = Tensor.randn(EVAL_BS,3,512,512)
 
-    inception_activations.append(inception(x).squeeze(3).squeeze(2).realize())
+    inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+
+    if len(inception_activations) > 20:
+      inception_activations = [Tensor.cat(*inception_activations)]
 
     # images_ = []
     # for j in range(EVAL_BS):
@@ -186,7 +189,7 @@ if __name__ == "__main__":
     # im.save("/tmp/rendered.png")
     # assert False
 
-    i += EVAL_DEVICE_BS
+    i += EVAL_GLOBAL_BS
     print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)})")
 
   inception_act = Tensor.cat(*inception_activations, dim=0)

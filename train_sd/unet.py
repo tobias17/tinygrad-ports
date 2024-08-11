@@ -223,7 +223,10 @@ class UNetModel:
 
   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, y:Optional[Tensor]=None) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch).cast(dtypes.float16)
-    emb   = t_emb.sequential(self.time_embed)
+    return self.pre_embedded(x, t_emb, ctx, y)
+  
+  def pre_embedded(self, x:Tensor, t_emb:Tensor, ctx:Tensor, y:Optional[Tensor]=None) -> Tensor:
+    emb = t_emb.sequential(self.time_embed)
 
     if y is not None:
       assert y.shape[0] == x.shape[0]
