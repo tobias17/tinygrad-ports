@@ -25,7 +25,7 @@ class DdimSampler:
 
     all_fnx_(alphas_cumprod), all_fnx_(sqrt_alphas_cumprod), all_fnx_(sqrt_one_minus_alphas_cumprod), all_fnx_(alphas_prev)
 
-    x_t = shard_fnx(Tensor.randn(batch_size, 4, 64, 64))
+    x_t = shard_fnx(Tensor.randn(batch_size, 4, 96, 96))
     time_range = np.flip(ddim_timesteps)
 
     for i, step in enumerate(tqdm(time_range)):
