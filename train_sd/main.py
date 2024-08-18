@@ -16,7 +16,7 @@ from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_s
 from unet import UNetModel, timestep_embedding # type: ignore
 from clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
-from examples.sdv2 import params, StableDiffusionV2, get_alphas_cumprod # type: ignore
+from examples.sdv2 import params, get_alphas_cumprod # type: ignore
 from ddim import DdimSampler
 # from inception import InceptionV3
 
@@ -24,6 +24,50 @@ from ddim import DdimSampler
 # - Figure out AdamW
 # - Investigate Async Beam
 # - Inhouse this god-awful webdataset module
+
+
+
+from examples.sdv2 import DiffusionModel, AutoencoderKL, FrozenOpenClipEmbedder, LegacyDDPMDiscretization, append_dims, run
+class StableDiffusionV2:
+  def __init__(self, unet_config:Dict, cond_stage_config:Dict, parameterization:str="v"):
+    self.model             = DiffusionModel(UNetModel(**unet_config))
+    self.first_stage_model = AutoencoderKL()
+    self.cond_stage_model  = FrozenOpenClipEmbedder(**cond_stage_config)
+    self.alphas_cumprod    = get_alphas_cumprod()
+    self.parameterization  = parameterization
+
+    self.discretization = LegacyDDPMDiscretization()
+    self.sigmas = self.discretization(1000, flip=True)
+
+  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+
+    def sigma_to_idx(s:Tensor) -> Tensor:
+      dists = s - self.sigmas.unsqueeze(1)
+      return dists.abs().argmin(axis=0).view(*s.shape)
+
+    sigma = self.sigmas[sigma_to_idx(sigma)]
+    sigma_shape = sigma.shape
+    sigma = append_dims(sigma, x)
+
+    c_skip = 1.0 / (sigma**2 + 1.0)
+    c_out = -sigma / (sigma**2 + 1.0) ** 0.5
+    c_in = 1.0 / (sigma**2 + 1.0) ** 0.5
+    c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
+
+    def prep(*tensors:Tensor):
+      return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
+    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], c_out, x*c_skip))
+
+  def decode(self, x:Tensor, height:int, width:int) -> Tensor:
+    x = self.first_stage_model.post_quant_conv(1/0.18215 * x)
+    x = self.first_stage_model.decoder(x)
+
+    # make image correct size and scale
+    x = (x + 1.0) / 2.0
+    x = x.reshape(3,height,width).permute(1,2,0).clip(0,1).mul(255).cast(dtypes.uint8)
+    return x
+
 
 
 if __name__ == "__main__":
@@ -41,17 +85,17 @@ if __name__ == "__main__":
 
   # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  DEVICE_BS = 2
+  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
+  # DEVICE_BS = 2
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  # DEVICE_BS = 1
+  GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
+  DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 15
+  EVAL_DEVICE_BS = 2
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -61,7 +105,7 @@ if __name__ == "__main__":
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
   load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
   for k,w in get_state_dict(wrapper_model).items():
-    if k.startswith("first_stage_model."):
+    if k.startswith("first_stage_model.") or k.startswith("model."):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
@@ -152,6 +196,8 @@ if __name__ == "__main__":
   i = 0
   df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
   captions = df["caption"].array
+  with open(get_output_root()+"/captions.txt", "w") as f:
+    f.write("\n".join(f"{i:05d}: {c}" for i,c in enumerate(captions)))
   inception_activations = []
 
   assert len(df) % EVAL_GLOBAL_BS == 0, f"eval dataset size ({len(df)}) must be divisible by the EVAL_GLOBAL_BS ({EVAL_GLOBAL_BS})"
@@ -165,13 +211,15 @@ if __name__ == "__main__":
   Tensor.no_grad = True
   while i < len(df):
     texts = captions[i:i+EVAL_GLOBAL_BS]
+    texts[0] = "a horse sized cat eating a bagel"
     tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
+    empty_token = wrapper_model.cond_stage_model.tokenize("")
 
     c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
-    uc = tokenize_step(Tensor.cat(*([wrapper_model.cond_stage_model.tokenize("")]*c.shape[0])).realize()) #.shard(GPUS, axis=0)
+    uc = tokenize_step(Tensor.cat(*([empty_token]*EVAL_GLOBAL_BS)).realize()) #.shard(GPUS, axis=0)
 
     z = sampler.sample(
-      model, c.shape[0], c, uc, num_steps=50,
+      wrapper_model.model.diffusion_model, EVAL_GLOBAL_BS, c, uc, num_steps=50,
       shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
       all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
     )
@@ -188,7 +236,8 @@ if __name__ == "__main__":
     images = []
     x_clip = x.to(Device.DEFAULT).realize()
     for j in range(EVAL_GLOBAL_BS):
-      im = Image.fromarray(x_clip[j].mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+      im = Image.fromarray(x_clip[j].clip(0,1).mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+      im.save(get_output_root("images")+f"/{i+j:05d}.png")
       images.append(clip_enc.prepare_image(im).unsqueeze(0))
     # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
     # print(f"clip_score: {clip_score.mean().numpy():.5f}")
@@ -212,6 +261,8 @@ if __name__ == "__main__":
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (i / len(df))) - wall_time_delta
     print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)}), elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+
+    input("next? ")
 
   inception_act = Tensor.cat(*inception_activations, dim=0)
   fid_score = inception.compute_score(inception_act)
