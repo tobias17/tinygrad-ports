@@ -55,7 +55,7 @@ class StableDiffusionV2:
     c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
     def prep(*tensors:Tensor):
-      return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+      return tuple(t.cast(TRAIN_DTYPE).realize() for t in tensors)
 
     return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], c_out, x*c_skip))
 
@@ -71,7 +71,7 @@ class StableDiffusionV2:
 
 
 if __name__ == "__main__":
-  seed = 421
+  seed = 42
   Tensor.manual_seed(seed)
 
   __OUTPUT_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
@@ -81,7 +81,7 @@ if __name__ == "__main__":
       os.makedirs(dirpath)
     return dirpath
 
-  TRAIN_DTYPE = dtypes.float16
+  TRAIN_DTYPE = dtypes.float32
 
   # GPUS = tuple([f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))])
 
@@ -105,17 +105,19 @@ if __name__ == "__main__":
   # load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/512-base-ema.ckpt")["state_dict"], strict=False)
   load_state_dict(wrapper_model, torch_load("/home/tiny/tinygrad/weights/768-v-ema.ckpt")["state_dict"], strict=False)
   for k,w in get_state_dict(wrapper_model).items():
+    w_ = w.cast(TRAIN_DTYPE)
     if k.startswith("first_stage_model.") or k.startswith("model."):
-      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+      w_ = w_.shard(GPUS, axis=None)
+    w.replace(w_).realize()
 
   model = UNetModel(**params["unet_config"])
-  load_state_dict(model, safe_load("archive/2024-08-18_21-49-34/weights/unet_step057344.safe"), strict=True)
+  # load_state_dict(model, safe_load("archive/2024-08-18_21-49-34/weights/unet_step057344.safe"), strict=True)
   for w in get_state_dict(model).values():
-    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+    w.replace(w.cast(TRAIN_DTYPE).shard(GPUS, axis=None)).realize()
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
   # optimizer = Adam(get_parameters(model), lr=1.25e-7 *50)
-  optimizer = SGD(get_parameters(model), lr=1.25e-7)
+  optimizer = SGD(get_parameters(model), lr=1.25e-7 *10)
 
   alphas_cumprod      = get_alphas_cumprod()
   alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1])
@@ -161,8 +163,12 @@ if __name__ == "__main__":
 
 
 
+  @TinyJit
+  def tokenize_step(tokens:Tensor) -> Tensor:
+    return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
 
-  if True:
+
+  if False:
 
     @TinyJit
     @Tensor.train()
@@ -175,10 +181,6 @@ if __name__ == "__main__":
       optimizer.step()
 
       return loss.realize()
-
-    @TinyJit
-    def tokenize_step(tokens:Tensor) -> Tensor:
-      return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
 
     def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
       return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
@@ -263,9 +265,10 @@ if __name__ == "__main__":
       uc = tokenize_step(Tensor.cat(*([empty_token]*EVAL_GLOBAL_BS)).realize()) #.shard(GPUS, axis=0)
 
       z = sampler.sample(
-        model, EVAL_GLOBAL_BS, c, uc, num_steps=50,
+        wrapper_model.model.diffusion_model, EVAL_GLOBAL_BS, c, uc, num_steps=50,
         shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
         all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
+        dtype=TRAIN_DTYPE,
       )
 
       x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)

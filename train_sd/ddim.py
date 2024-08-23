@@ -15,7 +15,7 @@ class DdimSampler:
   def run(self, model, x, t, c):
     return model.pre_embedded(x,t,c).realize()
 
-  def sample(self, model, batch_size:int, c:Tensor, uc:Tensor, num_steps:int=50, cfg_scale:float=8.0, shard_fnx=(lambda x: x), all_fnx_=(lambda x: x)) -> Tensor:
+  def sample(self, model, batch_size:int, c:Tensor, uc:Tensor, num_steps:int=50, cfg_scale:float=8.0, shard_fnx=(lambda x: x), all_fnx_=(lambda x: x), dtype=dtypes.float16) -> Tensor:
     ddim_timesteps = np.arange(1, TOTAL_STEPS+1, TOTAL_STEPS//num_steps)
     
     alphas_cumprod                = get_alphas_cumprod()
@@ -25,7 +25,7 @@ class DdimSampler:
 
     all_fnx_(alphas_cumprod), all_fnx_(sqrt_alphas_cumprod), all_fnx_(sqrt_one_minus_alphas_cumprod), all_fnx_(alphas_prev)
 
-    x_t = shard_fnx(Tensor.randn(batch_size, 4, 64, 64))
+    x_t = shard_fnx(Tensor.randn(batch_size, 4, 96, 96))
     time_range = np.flip(ddim_timesteps)
 
     for i, step in enumerate(tqdm(time_range)):
@@ -34,7 +34,7 @@ class DdimSampler:
       tms = Tensor.full((batch_size,), int(step))
       t_emb = timestep_embedding(tms, 320).realize()
 
-      def fp16r(z): return z.cast(dtypes.float16).realize()
+      def fp16r(z): return Tensor.cast(z, dtype).realize()
       x_t, t_emb = fp16r(x_t), fp16r(shard_fnx(t_emb))
 
       # TODO: this should be doable with the cat batch and chunk approach, just need to be clever with sharding
