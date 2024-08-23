@@ -115,12 +115,12 @@ if __name__ == "__main__":
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, eps=1.0)
   # optimizer = Adam(get_parameters(model), lr=1.25e-7 *50)
-  optimizer = SGD(get_parameters(model), lr=1.25e-7 *50)
+  optimizer = SGD(get_parameters(model), lr=1.25e-7)
 
   alphas_cumprod      = get_alphas_cumprod()
   alphas_cumprod_prev = Tensor([1.0]).cat(alphas_cumprod[:-1])
   sqrt_alphas_cumprod = alphas_cumprod.sqrt()
-  sqrt_on_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
+  sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
 
 
   # Dataset
@@ -146,27 +146,6 @@ if __name__ == "__main__":
   dataloader = WebLoader(dataset, batch_size=None, shuffle=False, num_workers=1, persistent_workers=True)
 
 
-  # Train Funcs and Utils
-
-  @TinyJit
-  @Tensor.train()
-  def train_step(x:Tensor, x_noisy:Tensor, t_emb:Tensor, c:Tensor) -> Tensor:
-    output = model.pre_embedded(x_noisy, t_emb, c)
-
-    loss = (x - output).square().mean()
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    return loss.realize()
-
-  @TinyJit
-  def tokenize_step(tokens:Tensor) -> Tensor:
-    return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
-
-  def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
-    return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
-
   MAX_QUEUE_SIZE = 10
 
   MAX_ITERS   = 512000
@@ -185,6 +164,25 @@ if __name__ == "__main__":
 
   if True:
 
+    @TinyJit
+    @Tensor.train()
+    def train_step(x:Tensor, x_noisy:Tensor, t_emb:Tensor, c:Tensor) -> Tensor:
+      output = model.pre_embedded(x_noisy, t_emb, c)
+
+      loss = (x - output).square().mean()
+      optimizer.zero_grad()
+      loss.backward()
+      optimizer.step()
+
+      return loss.realize()
+
+    @TinyJit
+    def tokenize_step(tokens:Tensor) -> Tensor:
+      return wrapper_model.cond_stage_model.embed_tokens(tokens).realize()
+
+    def prep_for_jit(*inputs:Tensor) -> Tuple[Tensor,...]:
+      return tuple(i.cast(TRAIN_DTYPE).shard(GPUS, axis=0).realize() for i in inputs)
+  
     # Main Train Loop
     for i, entry in enumerate(dataloader):
       if i >= MAX_ITERS:
@@ -196,8 +194,8 @@ if __name__ == "__main__":
       x = (sample_moments(entry["moments"]) * 0.18215)
       t = Tensor.randint(x.shape[0], low=0, high=1000)
       noise = Tensor.randn(x.shape)
-      x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
-                + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
+      x_noisy =   sqrt_alphas_cumprod          [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
+                + sqrt_one_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
       t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
       inputs = prep_for_jit(x, x_noisy, t_emb, c)
 
