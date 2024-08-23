@@ -11,7 +11,7 @@ from PIL import Image
 import pandas as pd # type: ignore
 import numpy as np
 
-from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save # type: ignore
+from tinygrad.nn.state import load_state_dict, torch_load, get_parameters, get_state_dict, safe_save, safe_load # type: ignore
 
 from unet import UNetModel, timestep_embedding # type: ignore
 from clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
@@ -83,19 +83,19 @@ if __name__ == "__main__":
 
   TRAIN_DTYPE = dtypes.float16
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))]
+  # GPUS = tuple([f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1))])
 
-  GPUS = [f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]]
-  DEVICE_BS = 2
+  # GPUS = tuple([f'{Device.DEFAULT}:{i}' for i in [1,2,3,4,5]])
+  # DEVICE_BS = 2
 
-  # GPUS = [f'{Device.DEFAULT}:{i}' for i in [4,5]]
-  # DEVICE_BS = 1
+  GPUS = tuple([f'{Device.DEFAULT}:{i}' for i in [4,5]])
+  DEVICE_BS = 1
 
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   EVAL_EVERY = math.ceil(512000.0 / GLOBAL_BS)
   print(f"Configured to Eval every {EVAL_EVERY} steps")
 
-  EVAL_DEVICE_BS = 10
+  EVAL_DEVICE_BS = 2
   EVAL_GLOBAL_BS = EVAL_DEVICE_BS * len(GPUS)
 
   # Model, Conditioner, Other Variables
@@ -109,6 +109,7 @@ if __name__ == "__main__":
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   model = UNetModel(**params["unet_config"])
+  load_state_dict(model, safe_load("archive/2024-08-18_21-49-34/weights/unet_step057344.safe"), strict=True)
   for w in get_state_dict(model).values():
     w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   # optimizer = AdamW(get_parameters(model), lr=1.25e-7, b1=0.9, b2=0.999, weight_decay=0.01)
@@ -173,8 +174,8 @@ if __name__ == "__main__":
   GRAPH_EVERY = 256
   SAVE_EVERY  = 4096
   ONLY_LAST   = False
-  losses = []
-  saved_losses = []
+  losses = [] # type: ignore
+  saved_losses = [] # type: ignore
 
   BEAM_VAL = BEAM.value
   BEAM.value = 0
@@ -182,139 +183,134 @@ if __name__ == "__main__":
 
 
 
+  if True:
 
+    # Main Train Loop
+    for i, entry in enumerate(dataloader):
+      if i >= MAX_ITERS:
+        break
 
-  # ##########################################
-  # sampler = DdimSampler()
-  # inception = FidInceptionV3().load_from_pretrained()
-  # for w in get_state_dict(inception).values():
-  #   w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
-  # clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
-  # tokenizer = Tokenizer.ClipTokenizer()
+      st = time.perf_counter()
 
-  # i = 0
-  # df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
-  # captions = df["caption"].array
-  # with open(get_output_root()+"/captions.txt", "w") as f:
-  #   f.write("\n".join(f"{i:05d}: {c}" for i,c in enumerate(captions)))
-  # inception_activations = []
+      c = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
+      x = (sample_moments(entry["moments"]) * 0.18215)
+      t = Tensor.randint(x.shape[0], low=0, high=1000)
+      noise = Tensor.randn(x.shape)
+      x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
+                + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
+      t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
+      inputs = prep_for_jit(x, x_noisy, t_emb, c)
 
-  # assert len(df) % EVAL_GLOBAL_BS == 0, f"eval dataset size ({len(df)}) must be divisible by the EVAL_GLOBAL_BS ({EVAL_GLOBAL_BS})"
+      pt = time.perf_counter()
 
-  # @TinyJit
-  # def run_inc_and_clip(x:Tensor, tokens:Tensor, images:Tensor) -> Tuple[Tensor,Tensor]:
-  #   return inception(x).realize(), clip_enc.get_clip_score(tokens, images).realize()
+      BEAM.value = BEAM_VAL
+      loss = train_step(*inputs).numpy().item()
+      BEAM.value = 0
+      losses.append(loss)
 
-  # wall_time_start = time.time()
+      et = time.perf_counter()
+      tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
 
-  # Tensor.no_grad = True
-  # while i < len(df):
-  #   texts = captions[i:i+EVAL_GLOBAL_BS]
-  #   texts[0] = "a horse sized cat eating a bagel"
-  #   tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
-  #   empty_token = wrapper_model.cond_stage_model.tokenize("")
+      if i > 0 and i % MEAN_EVERY == 0:
+        saved_losses.append(sum(losses) / len(losses))
+        losses = []
+      if i > 0 and i % GRAPH_EVERY == 0:
+        plt.clf()
+        plt.plot(np.arange(1,len(saved_losses)+1)*MEAN_EVERY, saved_losses)
+        plt.ylim((0,None))
+        plt.xlabel("step")
+        plt.ylabel("loss")
+        figure = plt.gcf()
+        figure.set_size_inches(18/1.5, 10/1.5)
+        plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
+      if i > 0 and i % SAVE_EVERY == 0:
+        safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:06d}.safe"))
+      
+      if i > 0 and i % EVAL_EVERY == 0:
+        pass
 
-  #   c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
-  #   uc = tokenize_step(Tensor.cat(*([empty_token]*EVAL_GLOBAL_BS)).realize()) #.shard(GPUS, axis=0)
+  else:
 
-  #   z = sampler.sample(
-  #     wrapper_model.model.diffusion_model, EVAL_GLOBAL_BS, c, uc, num_steps=50,
-  #     shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
-  #     all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
-  #   )
+    # Evaluation Loop
+    sampler = DdimSampler()
+    inception = FidInceptionV3().load_from_pretrained()
+    for w in get_state_dict(inception).values():
+      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+    clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
+    tokenizer = Tokenizer.ClipTokenizer()
 
-  #   x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
-  #   x = wrapper_model.first_stage_model.decoder(x)
-  #   x = (x + 1.0) / 2.0
-  #   x.realize()
+    i = 0
+    df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
+    captions = df["caption"].array
+    with open(get_output_root()+"/captions.txt", "w") as f:
+      f.write("\n".join(f"{i:05d}: {c}" for i,c in enumerate(captions)))
+    inception_activations = []
 
-  #   # inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
-  #   # if len(inception_activations) > 20:
-  #   #   inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
+    assert len(df) % EVAL_GLOBAL_BS == 0, f"eval dataset size ({len(df)}) must be divisible by the EVAL_GLOBAL_BS ({EVAL_GLOBAL_BS})"
 
-  #   images = []
-  #   x_clip = x.to(Device.DEFAULT).realize()
-  #   for j in range(EVAL_GLOBAL_BS):
-  #     im = Image.fromarray(x_clip[j].clip(0,1).mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
-  #     im.save(get_output_root("images")+f"/{i+j:05d}.png")
-  #     images.append(clip_enc.prepare_image(im).unsqueeze(0))
-  #   # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
-  #   # print(f"clip_score: {clip_score.mean().numpy():.5f}")
+    @TinyJit
+    def run_inc_and_clip(x:Tensor, tokens:Tensor, images:Tensor) -> Tuple[Tensor,Tensor]:
+      return inception(x).realize(), clip_enc.get_clip_score(tokens, images).realize()
 
-  #   inc_out, clip_out = run_inc_and_clip(x.realize(), Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+    wall_time_start = time.time()
 
-  #   inception_activations.append(inc_out.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
-  #   if len(inception_activations) > 20:
-  #     inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
+    Tensor.no_grad = True
+    while i < len(df):
+      texts = captions[i:i+EVAL_GLOBAL_BS]
+      texts[0] = "a horse sized cat eating a bagel"
+      tokens = [wrapper_model.cond_stage_model.tokenize(t) for t in texts]
+      empty_token = wrapper_model.cond_stage_model.tokenize("")
 
-  #   print(f"clip_score: {clip_out.mean().numpy():.5f}")
+      c  = tokenize_step(Tensor.cat(*tokens).realize()) #.shard(GPUS, axis=0)
+      uc = tokenize_step(Tensor.cat(*([empty_token]*EVAL_GLOBAL_BS)).realize()) #.shard(GPUS, axis=0)
 
-  #   i += EVAL_GLOBAL_BS
+      z = sampler.sample(
+        model, EVAL_GLOBAL_BS, c, uc, num_steps=50,
+        shard_fnx=(lambda x: x.shard(GPUS, axis=0)),
+        all_fnx_=(lambda x: x.shard_(GPUS, axis=None)),
+      )
 
-  #   def smart_print(sec:float) -> str:
-  #     if sec < 60: return f"{sec:.0f} sec"
-  #     mins = sec / 60.0
-  #     if mins < 60: return f"{mins:.1f} mins"
-  #     hours = mins / 60.0
-  #     return f"{hours:.1f} hours"
-  #   wall_time_delta = time.time() - wall_time_start
-  #   eta_time = (wall_time_delta / (i / len(df))) - wall_time_delta
-  #   print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)}), elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+      x = wrapper_model.first_stage_model.post_quant_conv(1/0.18215 * z)
+      x = wrapper_model.first_stage_model.decoder(x)
+      x = (x + 1.0) / 2.0
+      x.realize()
 
-  #   input("next? ")
+      # inception_activations.append(inception(x).squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+      # if len(inception_activations) > 20:
+      #   inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
 
-  # inception_act = Tensor.cat(*inception_activations, dim=0)
-  # fid_score = inception.compute_score(inception_act)
-  # print(f"fid_score:  {fid_score}")
-  # Tensor.no_grad = None
-  # ##########################################
+      images = []
+      x_clip = x.to(Device.DEFAULT).realize()
+      for j in range(EVAL_GLOBAL_BS):
+        im = Image.fromarray(x_clip[j].clip(0,1).mul(255).cast(dtypes.uint8).permute(1,2,0).numpy())
+        im.save(get_output_root("images")+f"/{i+j:05d}.png")
+        images.append(clip_enc.prepare_image(im).unsqueeze(0))
+      # clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+      # print(f"clip_score: {clip_score.mean().numpy():.5f}")
 
+      inc_out, clip_out = run_inc_and_clip(x.realize(), Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
+      inception_activations.append(inc_out.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+      if len(inception_activations) > 20:
+        inception_activations = [Tensor.cat(*inception_activations, dim=0).realize()]
 
+      print(f"clip_score: {clip_out.mean().numpy():.5f}")
 
+      i += EVAL_GLOBAL_BS
 
+      def smart_print(sec:float) -> str:
+        if sec < 60: return f"{sec:.0f} sec"
+        mins = sec / 60.0
+        if mins < 60: return f"{mins:.1f} mins"
+        hours = mins / 60.0
+        return f"{hours:.1f} hours"
+      wall_time_delta = time.time() - wall_time_start
+      eta_time = (wall_time_delta / (i / len(df))) - wall_time_delta
+      print(f"{100.0*i/len(df):02.2f}% ({i}/{len(df)}), elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
-  # Main Train Loop
+      input("next? ")
 
-  for i, entry in enumerate(dataloader):
-    if i >= MAX_ITERS:
-      break
-
-    st = time.perf_counter()
-
-    c = tokenize_step(Tensor.cat(*[wrapper_model.cond_stage_model.tokenize(t) for t in entry["txt"]]))
-    x = (sample_moments(entry["moments"]) * 0.18215)
-    t = Tensor.randint(x.shape[0], low=0, high=1000)
-    noise = Tensor.randn(x.shape)
-    x_noisy =   sqrt_alphas_cumprod         [t].reshape(GLOBAL_BS, 1, 1, 1) * x \
-              + sqrt_on_minus_alphas_cumprod[t].reshape(GLOBAL_BS, 1, 1, 1) * noise
-    t_emb = timestep_embedding(t, 320).cast(TRAIN_DTYPE)
-    inputs = prep_for_jit(x, x_noisy, t_emb, c)
-
-    pt = time.perf_counter()
-
-    BEAM.value = BEAM_VAL
-    loss = train_step(*inputs).numpy().item()
-    BEAM.value = 0
-    losses.append(loss)
-
-    et = time.perf_counter()
-    tqdm.write(f"{i:05d}: {(et-st)*1000.0:6.0f} ms run, {(pt-st)*1000.0:6.0f} ms prep, {(et-pt)*1000.0:6.0f} ms step, {loss:>2.5f} train loss")
-
-    if i > 0 and i % MEAN_EVERY == 0:
-      saved_losses.append(sum(losses) / len(losses))
-      losses = []
-    if i > 0 and i % GRAPH_EVERY == 0:
-      plt.clf()
-      plt.plot(np.arange(1,len(saved_losses)+1)*MEAN_EVERY, saved_losses)
-      plt.ylim((0,None))
-      plt.xlabel("step")
-      plt.ylabel("loss")
-      figure = plt.gcf()
-      figure.set_size_inches(18/1.5, 10/1.5)
-      plt.savefig(os.path.join(get_output_root(), "loss"), dpi=100)
-    if i > 0 and i % SAVE_EVERY == 0:
-      safe_save(get_state_dict(model), os.path.join(get_output_root("weights"), "unet_last.safe" if ONLY_LAST else f"unet_step{i:06d}.safe"))
-    
-    if i > 0 and i % EVAL_EVERY == 0:
-      pass
+    inception_act = Tensor.cat(*inception_activations, dim=0)
+    fid_score = inception.compute_score(inception_act)
+    print(f"fid_score:  {fid_score}")
+    Tensor.no_grad = None
