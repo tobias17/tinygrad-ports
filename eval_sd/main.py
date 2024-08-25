@@ -1,31 +1,34 @@
-from tinygrad import Tensor, dtypes, Device # type: ignore
+from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict
-from examples.sdxl import SDXL, DPMPP2MSampler, configs # type: ignore
+from examples.sdxl import SDXL, DPMPP2MSampler, append_dims, configs # type: ignore
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import pandas as pd # type: ignore
 from PIL import Image
+from functools import partial
 
-# temporary overwrite to fix function for batching and external
-def create_conditioning(self:SDXL, pos_prompt:str, img_width:int, img_height:int, aesthetic_score:float=5.0) -> Tuple[Dict,Dict]:
-  N = 1
-  batch_c : Dict = {
-    "txt": pos_prompt,
-    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-  }
-  batch_uc: Dict = {
-    "txt": "",
-    "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-    "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
-    "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
-    "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
-  }
-  return self.conditioner(batch_c), self.conditioner(batch_uc, force_zero_embeddings=["txt"])
-SDXL.create_conditioning = create_conditioning
 
+@TinyJit
+def run_model(model, x, tms, ctx, y, c_out, add):
+  return (model(x, tms, ctx, y)*c_out + add).to(Device.DEFAULT).realize()
+
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, gpus:Tuple[str,...]) -> Tuple[Tensor]:
+  def sigma_to_idx(s:Tensor) -> Tensor:
+    dists = s - self.sigmas.unsqueeze(1)
+    return dists.abs().argmin(axis=0).view(*s.shape)
+
+  sigma = self.sigmas[sigma_to_idx(sigma)]
+  sigma_shape = sigma.shape
+  sigma = append_dims(sigma, x)
+
+  c_out   = -sigma
+  c_in    = 1 / (sigma**2 + 1.0) ** 0.5
+  c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
+
+  def prep(*tensors:Tensor):
+    return tuple(t.cast(dtypes.float16).shard(gpus, axis=0).realize() for t in tensors)
+
+  return run_model(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
 def main():
 
@@ -45,7 +48,7 @@ def main():
 
   # Load model
   model = SDXL(configs["SDXL_Base"])
-  load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
+  # load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
   for k,w in get_state_dict(model).items():
     if k.startswith("model."):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
@@ -60,18 +63,9 @@ def main():
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
-    batch_c, batch_uc = [], []
-    for text in captions[dataset_i:dataset_i+GLOBAL_BS]:
-      c, uc = model.create_conditioning(text, IMG_SIZE, IMG_SIZE)
-      batch_c.append(c)
-      batch_uc.append(uc)
-    
-    c, uc = {}, {}
-    for key in batch_c [0]: c [key] = Tensor.cat(*[bc[key] for bc in batch_c ]).shard(GPUS, axis=0).realize()
-    for key in batch_uc[0]: uc[key] = Tensor.cat(*[bu[key] for bu in batch_uc]).shard(GPUS, axis=0).realize()
-
+    c, uc = model.create_conditioning(captions[dataset_i:dataset_i+GLOBAL_BS].tolist(), IMG_SIZE, IMG_SIZE)  
     randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE)
-    z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
+    z = sampler(partial(denoise, model, gpus=GPUS), randn, c, uc, NUM_STEPS)
     x = model.decode(z).realize()
     x = (x + 1.0) / 2.0
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
