@@ -69,6 +69,8 @@ def main():
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
     texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
+    with open("inputs/captions.txt", "w") as f:
+      f.write("\n".join(texts))
     c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)  
     randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE)
     z = sampler(partial(denoise, model, gpus=GPUS), randn, c, uc, NUM_STEPS)
@@ -81,7 +83,7 @@ def main():
     images = []
     for i in range(GLOBAL_BS):
       im = Image.fromarray(x[i].numpy())
-      im.save(f"/tmp/eval_gen_{i}.png")
+      im.save(f"inputs/gen_{i}.png")
       images.append(clip_enc.prepare_image(im).unsqueeze(0))
 
     tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
