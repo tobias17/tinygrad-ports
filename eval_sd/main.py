@@ -1,6 +1,7 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict
 from examples.sdxl import SDXL, DPMPP2MSampler, append_dims, configs # type: ignore
+from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 
 from typing import Dict, List, Tuple, Optional
 import pandas as pd # type: ignore
@@ -10,7 +11,7 @@ from functools import partial
 
 @TinyJit
 def run_model(model, x, tms, ctx, y, c_out, add):
-  return (model(x, tms, ctx, y)*c_out + add).to(Device.DEFAULT).realize()
+  return model(x, tms, ctx, y).mul(c_out).add(add).to(Device.DEFAULT).realize()
 
 def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, gpus:Tuple[str,...]) -> Tuple[Tensor]:
   def sigma_to_idx(s:Tensor) -> Tensor:
@@ -32,6 +33,8 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, gpus:Tuple[str,...]) -
 
 def main():
 
+  Tensor.manual_seed(42)
+
   # Define constants
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in [4,5]]
@@ -48,11 +51,13 @@ def main():
 
   # Load model
   model = SDXL(configs["SDXL_Base"])
-  # load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
+  load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
   for k,w in get_state_dict(model).items():
     if k.startswith("model."):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
-  
+  clip_enc = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
+  tokenizer = Tokenizer.ClipTokenizer()
+
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE)
 
@@ -63,7 +68,8 @@ def main():
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
-    c, uc = model.create_conditioning(captions[dataset_i:dataset_i+GLOBAL_BS].tolist(), IMG_SIZE, IMG_SIZE)  
+    texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
+    c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)  
     randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE)
     z = sampler(partial(denoise, model, gpus=GPUS), randn, c, uc, NUM_STEPS)
     x = model.decode(z).realize()
@@ -72,9 +78,16 @@ def main():
     x = x.to(Device.DEFAULT).realize()
     print(x.shape)
 
+    images = []
     for i in range(GLOBAL_BS):
-      im = Image.fromarray(x.numpy())
+      im = Image.fromarray(x[i].numpy())
       im.save(f"/tmp/eval_gen_{i}.png")
+      images.append(clip_enc.prepare_image(im).unsqueeze(0))
+
+    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
+    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+    print(f"clip_score: {clip_score.mean().numpy():.5f}")
+  
     input("next? ")
 
     dataset_i += GLOBAL_BS
