@@ -49,8 +49,8 @@ def gen_images():
 
   # Define constants
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in [4,5]]
-  DEVICE_BS = 2
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
+  DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   IMG_SIZE = 1024
@@ -59,7 +59,7 @@ def gen_images():
   assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
   GUIDANCE_SCALE = 8.0
-  NUM_STEPS = 2
+  NUM_STEPS = 20
 
   # Load model
   model = SDXL(configs["SDXL_Base"])
