@@ -14,9 +14,9 @@ import time
 
 @TinyJit
 def run_model(model, x, tms, ctx, y, c_out, add):
-  return model(x, tms, ctx, y).mul(c_out).add(add).to(Device.DEFAULT).realize()
+  return model(x, tms, ctx, y).mul(c_out).add(add).realize()
 
-def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, gpus:Tuple[str,...]) -> Tuple[Tensor]:
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict) -> Tuple[Tensor]:
   def sigma_to_idx(s:Tensor) -> Tensor:
     dists = s - self.sigmas.unsqueeze(1)
     return dists.abs().argmin(axis=0).view(*s.shape)
@@ -30,7 +30,7 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, gpus:Tuple[str,...]) -
   c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
 
   def prep(*tensors:Tensor):
-    return tuple(t.cast(dtypes.float16).shard(gpus, axis=0).realize() for t in tensors)
+    return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
   return run_model(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
@@ -40,6 +40,8 @@ def smart_print(sec:float) -> str:
   if mins < 60: return f"{mins:.1f} mins"
   hours = mins / 60.0
   return f"{hours:.1f} hours"
+
+
 
 def gen_images():
 
@@ -63,7 +65,7 @@ def gen_images():
   model = SDXL(configs["SDXL_Base"])
   load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
   for k,w in get_state_dict(model).items():
-    if k.startswith("model."):
+    if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
 
   # Create sampler
@@ -86,9 +88,11 @@ def gen_images():
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
     texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
-    c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)  
-    randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE)
-    z = sampler(partial(denoise, model, gpus=GPUS), randn, c, uc, NUM_STEPS)
+    c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
+    for t in  c.values(): t.shard_(GPUS, axis=0)
+    for t in uc.values(): t.shard_(GPUS, axis=0)
+    randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
+    z = sampler(partial(denoise, model), randn, c, uc, NUM_STEPS)
     x = model.decode(z).realize()
     x = (x + 1.0) / 2.0
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
@@ -101,6 +105,8 @@ def gen_images():
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+
+
 
 def compute_clip():
   clip_enc = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
