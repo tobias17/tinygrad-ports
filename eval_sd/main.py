@@ -4,7 +4,9 @@ from examples.sdxl import SDXL, DPMPP2MSampler, append_dims, configs # type: ign
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 
 from typing import Dict, List, Tuple, Optional
+from threading import Thread
 import pandas as pd # type: ignore
+import numpy as np
 from PIL import Image
 from functools import partial
 import time
@@ -55,7 +57,7 @@ def gen_images():
   assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
   GUIDANCE_SCALE = 8.0
-  NUM_STEPS = 20
+  NUM_STEPS = 2
 
   # Load model
   model = SDXL(configs["SDXL_Base"])
@@ -75,6 +77,11 @@ def gen_images():
 
   wall_time_start = time.time()
 
+  def async_save(images:np.ndarray, start_i:int):
+    for image_i in range(GLOBAL_BS):
+      im = Image.fromarray(images[image_i])
+      im.save(f"inputs/gen_{start_i+image_i:05d}.png")
+
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
@@ -85,17 +92,15 @@ def gen_images():
     x = model.decode(z).realize()
     x = (x + 1.0) / 2.0
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
-    x = x.to(Device.DEFAULT).realize()
+    x = x.numpy()
 
-    for image_i in range(GLOBAL_BS):
-      im = Image.fromarray(x[image_i].numpy())
-      im.save(f"inputs/gen_{dataset_i+image_i:05d}.png")
+    Thread(target=async_save, args=(x,dataset_i)).start()
 
     dataset_i += GLOBAL_BS
 
     wall_time_delta = time.time() - wall_time_start
-    eta_time = (wall_time_delta / (dataset_i / len(captions))) - wall_time_delta
-    print(f"{dataset_i:05d}: elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+    eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
 def compute_clip():
   clip_enc = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
@@ -127,8 +132,8 @@ def compute_clip():
     all_scores += scores.tolist()
 
     wall_time_delta = time.time() - wall_time_start
-    eta_time = (wall_time_delta / (dataset_i / len(captions))) - wall_time_delta
-    print(f"{dataset_i:05d}: elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, scores: {scores}")
+    eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, scores: {scores}")
 
     dataset_i += GLOBAL_BS
 
