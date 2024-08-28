@@ -73,11 +73,11 @@ def gen_images():
   with open("inputs/captions.txt", "w") as f:
     f.write("\n".join(captions))
 
+  wall_time_start = time.time()
+
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
-    wall_time_start = time.time()
-
     texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
     c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)  
     randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE)
@@ -87,15 +87,15 @@ def gen_images():
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
     x = x.to(Device.DEFAULT).realize()
 
-    for i in range(GLOBAL_BS):
-      im = Image.fromarray(x[i].numpy())
-      im.save(f"inputs/gen_{dataset_i + i:05d}.png")
-
-    wall_time_delta = time.time() - wall_time_start
-    eta_time = (wall_time_delta / (i / len(captions))) - wall_time_delta
-    print(f"{i:05d}: elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+    for image_i in range(GLOBAL_BS):
+      im = Image.fromarray(x[image_i].numpy())
+      im.save(f"inputs/gen_{dataset_i+image_i:05d}.png")
 
     dataset_i += GLOBAL_BS
+
+    wall_time_delta = time.time() - wall_time_start
+    eta_time = (wall_time_delta / (dataset_i / len(captions))) - wall_time_delta
+    print(f"{dataset_i:05d}: elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
 def compute_clip():
   clip_enc = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
@@ -108,21 +108,27 @@ def compute_clip():
   with open("inputs/captions.txt", "r") as f:
     captions = f.read().split("\n")
 
+  wall_time_start = time.time()
   all_scores = []
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
+    texts = captions[dataset_i:dataset_i+GLOBAL_BS]
+    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
+
     images = []
-    for i in range(GLOBAL_BS):
-      im = Image.open(f"inputs/gen_{dataset_i + i:05d}.png")
+    for image_i in range(GLOBAL_BS):
+      im = Image.open(f"inputs/gen_{dataset_i+image_i:05d}.png")
       images.append(clip_enc.prepare_image(im).unsqueeze(0))
 
-    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
-    clip_score = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
-    scores = clip_score.numpy()
-    print(f"clip_scores: {scores:.5f}")
+    clip_score  = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+    scores      = clip_score.numpy()
     all_scores += scores.tolist()
+
+    wall_time_delta = time.time() - wall_time_start
+    eta_time = (wall_time_delta / (dataset_i / len(captions))) - wall_time_delta
+    print(f"{dataset_i:05d}: elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, scores: {scores}")
 
     dataset_i += GLOBAL_BS
 
