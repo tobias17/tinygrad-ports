@@ -107,14 +107,15 @@ def gen_images():
     print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
 
+@TinyJit
+def clip_step(model, tokens, images):
+  return model(tokens, images).realize()
 
 def compute_clip():
+  GLOBAL_BS = 150
+
   clip_enc = OpenClipEncoder(**clip_configs["ViT-H-14"]).load_from_pretrained()
   tokenizer = Tokenizer.ClipTokenizer()
-
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in [4,5]]
-  DEVICE_BS = 2
-  GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   with open("inputs/captions.txt", "r") as f:
     captions = f.read().split("\n")
@@ -125,7 +126,7 @@ def compute_clip():
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
-    texts = captions[dataset_i:dataset_i+GLOBAL_BS]
+    texts  = captions[dataset_i:dataset_i+GLOBAL_BS]
     tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
 
     images = []
@@ -133,17 +134,17 @@ def compute_clip():
       im = Image.open(f"inputs/gen_{dataset_i+image_i:05d}.png")
       images.append(clip_enc.prepare_image(im).unsqueeze(0))
 
-    clip_score  = clip_enc.get_clip_score(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+    clip_score  = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
     scores      = clip_score.numpy()
     all_scores += scores.tolist()
 
+    dataset_i += GLOBAL_BS
+
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
-    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, scores: {scores}")
-
-    dataset_i += GLOBAL_BS
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, batch_scores_mean: {scores.mean():.4f}")
 
   print(f"average_clip_score: {sum(all_scores) / len(all_scores)}")
 
 if __name__ == "__main__":
-  gen_images()
+  compute_clip()
