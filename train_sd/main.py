@@ -314,4 +314,4 @@ if __name__ == "__main__":
     inception_act = Tensor.cat(*inception_activations, dim=0)
     fid_score = inception.compute_score(inception_act)
     print(f"fid_score:  {fid_score}")
-    Tensor.no_grad = None
+    Tensor.no_grad = False

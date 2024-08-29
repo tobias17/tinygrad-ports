@@ -1,7 +1,9 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict
+from tinygrad.helpers import trange
 from examples.sdxl import SDXL, DPMPP2MSampler, append_dims, configs # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
+from inception import FidInceptionV3 # type: ignore
 
 from typing import Dict, List, Tuple, Optional
 from threading import Thread
@@ -146,5 +148,52 @@ def compute_clip():
 
   print(f"average_clip_score: {sum(all_scores) / len(all_scores)}")
 
+
+
+@TinyJit
+def inception_step(model:FidInceptionV3, x:Tensor) -> Tensor:
+  return model(x).realize()
+
+def compute_fid():
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
+  DEVICE_BS = 50
+  GLOBAL_BS = DEVICE_BS * len(GPUS)
+  TEST_SIZE = 30_000
+  Tensor.no_grad = True
+
+  inception = FidInceptionV3().load_from_pretrained()
+  for w in get_state_dict(inception).values():
+    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  
+  wall_time_start = time.time()
+  inc_act = []
+
+  dataset_i = 0
+  assert TEST_SIZE % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide TEST_SIZE ({TEST_SIZE}) for now"
+  while dataset_i < TEST_SIZE:
+    images = []
+    for image_i in trange(GLOBAL_BS):
+      im = Image.open(f"inputs/gen_{dataset_i+image_i:05d}.png")
+      images.append(Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0))
+
+    x = Tensor.cat(*images, dim=0).shard(GPUS, axis=0)
+
+    inc_out = inception_step(inception, x.realize())
+    inc_act.append(inc_out.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+
+    if len(inc_act) > 20:
+      inc_act = [Tensor.cat(*inc_act, dim=0).realize()]
+
+    dataset_i += GLOBAL_BS
+
+    wall_time_delta = time.time() - wall_time_start
+    eta_time = (wall_time_delta / (dataset_i/TEST_SIZE)) - wall_time_delta
+    print(f"{dataset_i:05d}: {100.0*dataset_i/TEST_SIZE:02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+
+  inception_act = Tensor.cat(*inc_act, dim=0)
+  fid_score = inception.compute_score(inception_act)
+  print(f"fid_score:  {fid_score}")
+
+
 if __name__ == "__main__":
-  compute_clip()
+  compute_fid()
