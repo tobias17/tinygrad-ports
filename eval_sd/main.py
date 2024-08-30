@@ -1,40 +1,17 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict
 from tinygrad.helpers import trange
-from examples.sdxl import SDXL, DPMPP2MSampler, append_dims, configs # type: ignore
+from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
 
-from typing import Dict, List, Tuple, Optional
 from threading import Thread
 import pandas as pd # type: ignore
 import numpy as np
 from PIL import Image
-from functools import partial
 import time
 
 
-@TinyJit
-def run_model(model, x, tms, ctx, y, c_out, add):
-  return model(x, tms, ctx, y).mul(c_out).add(add).realize()
-
-def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict) -> Tuple[Tensor]:
-  def sigma_to_idx(s:Tensor) -> Tensor:
-    dists = s - self.sigmas.unsqueeze(1)
-    return dists.abs().argmin(axis=0).view(*s.shape)
-
-  sigma = self.sigmas[sigma_to_idx(sigma)]
-  sigma_shape = sigma.shape
-  sigma = append_dims(sigma, x)
-
-  c_out   = -sigma
-  c_in    = 1 / (sigma**2 + 1.0) ** 0.5
-  c_noise = sigma_to_idx(sigma.reshape(sigma_shape))
-
-  def prep(*tensors:Tensor):
-    return tuple(t.cast(dtypes.float16).realize() for t in tensors)
-
-  return run_model(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
 def smart_print(sec:float) -> str:
   if sec < 60: return f"{sec:.0f} sec"
@@ -71,7 +48,7 @@ def gen_images():
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
 
   # Create sampler
-  sampler = DPMPP2MSampler(GUIDANCE_SCALE)
+  sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
 
   # Load dataset
   df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
@@ -94,7 +71,7 @@ def gen_images():
     for t in  c.values(): t.shard_(GPUS, axis=0)
     for t in uc.values(): t.shard_(GPUS, axis=0)
     randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
-    z = sampler(partial(denoise, model), randn, c, uc, NUM_STEPS)
+    z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
     x = model.decode(z).realize()
     x = (x + 1.0) / 2.0
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
@@ -196,4 +173,4 @@ def compute_fid():
 
 
 if __name__ == "__main__":
-  compute_fid()
+  gen_images()
