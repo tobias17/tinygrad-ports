@@ -1,7 +1,7 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict
 from tinygrad.helpers import trange
-from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type: ignore
+from examples.sdxl import SDXL, DPMPP2MSampler, configs # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
 
@@ -48,7 +48,7 @@ def gen_images():
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
 
   # Create sampler
-  sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
+  sampler = DPMPP2MSampler(GUIDANCE_SCALE)
 
   # Load dataset
   df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
