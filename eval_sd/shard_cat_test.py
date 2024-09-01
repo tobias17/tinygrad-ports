@@ -1,7 +1,8 @@
-from tinygrad import Tensor, Device
+from tinygrad import Tensor, Device # type: ignore
 from typing import Tuple
+import itertools
 
-GPUS = tuple([f"{Device.DEFAULT}:{i}" for i in [3,4,5]])
+GPUS = tuple([f"{Device.DEFAULT}" for _ in range(3)])
 DEVICE_BS = 1
 GLOBAL_BS = DEVICE_BS * len(GPUS)
 
@@ -40,5 +41,19 @@ def ver3():
   for i,v in enumerate(c.chunk(2)):
     print(f"chunk {i}:\n{v.numpy()}\n")
 
+def ver4():
+  def cat_multi(self:Tensor, *args:Tensor, dim:int=0) -> Tensor:
+    if len(args) == 0: return self
+    from tinygrad.multi import MultiLazyBuffer # type: ignore
+    catargs = [self, *args]
+    assert all(isinstance(y.lazydata, MultiLazyBuffer) and all(y.lazydata.real) and (y.lazydata.axis == dim) for y in catargs)
+    assert all(len(self.shape) == len(y.shape) and self.requires_grad == y.requires_grad and self.dtype == y.dtype and all(y.shape[i] == s for i,s in enumerate(self.shape)) for y in args)
+    return Tensor(MultiLazyBuffer(tuple(lb for y in catargs for lb in y.lazydata.lbs), dim), tuple(dev for y in catargs for dev in y.device), self.dtype)
+  a, b = [Tensor.randn(GLOBAL_BS,2,2).shard(GPUS, axis=0) for _ in range(2)]
+  c = cat_multi(a, b)
+  print(f"full thing:\n{c.numpy()}\n")
+  # for i,v in enumerate(c.chunk(2)):
+  #   print(f"chunk {i}:\n{v.numpy()}\n")
+
 if __name__ == "__main__":
-  ver3()
+  ver4()
