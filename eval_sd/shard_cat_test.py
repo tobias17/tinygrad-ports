@@ -80,5 +80,10 @@ def ver4():
   for i,v in enumerate(c.chunk(2)):
     print(f"chunk {i}:\n{v.numpy()}\n")
 
+def test_multi_shrink():
+  a = Tensor.randn(3,2,2).shard(GPUS, axis=0)
+  b = a.shrink(((0,1),None,None))
+  print(b.numpy())
+
 if __name__ == "__main__":
-  ver4()
+  test_multi_shrink()
