@@ -1,6 +1,5 @@
 from tinygrad import Tensor, Device # type: ignore
 from typing import Tuple
-import itertools
 
 GPUS = tuple([f"{Device.DEFAULT}" for _ in range(3)])
 DEVICE_BS = 1
@@ -74,16 +73,54 @@ def ver4():
                            self.axis, self.real)
   MultiLazyBuffer.shrink = shrink
 
-  a, b = [Tensor.randn(GLOBAL_BS,2,2).shard(GPUS, axis=0) for _ in range(2)]
+  from tinygrad.lazy import LazyBuffer # type: ignore
+  from tinygrad.ops import BinaryOps # type: ignore
+  from typing import List
+  import functools
+  def get_real_bounds(self:MultiLazyBuffer):
+    real_bounds, count = [], 0
+    for real,(start,end) in zip(self.real, self.bounds):
+      if not real:
+        real_bounds.append((count, count))
+      else:
+        real_bounds.append((count, count + (delta := end - start)))
+        count += delta
+    return real_bounds
+  MultiLazyBuffer.get_real_bounds = get_real_bounds
+  def copy_to_device(self:MultiLazyBuffer, device:str) -> LazyBuffer:
+    if self.axis is None:
+      # if we already have a copy on the device, return that
+      for lb in self.real_lbs:
+        if lb.device == device: return lb
+      return self.real_lbs[0].copy_to_device(device)
+    # copy lbs to device, pad to final shape, and sum
+    llbs:List[LazyBuffer] = []
+    real_bounds = self.get_real_bounds()
+    for lb,real,(start,end) in zip(self.lbs, self.real, real_bounds):
+      if not real: continue
+      pad_arg = tuple((0,0) if a != self.axis else (start, real_bounds[-1][1]-end) for a in range(len(lb.shape)))
+      llbs.append(lb.copy_to_device(device).pad(pad_arg))
+    return functools.reduce(lambda x,y: x.e(BinaryOps.ADD, y), llbs)
+  MultiLazyBuffer.copy_to_device = copy_to_device
+
+  a, b = [Tensor.randn(3,2,2).shard(GPUS, axis=0) for _ in range(2)]
   c = cat_multi(a, b)
-  print(f"full thing:\n{c.numpy()}\n")
+  # print(f"full thing:\n{c.numpy()}\n")
   for i,v in enumerate(c.chunk(2)):
-    print(f"chunk {i}:\n{v.numpy()}\n")
+    print(v.shape)
+    x = v.contiguous()
+    y = x.to("CLANG")
+    z = y.realize()
+    print(f"chunk {i}:\n{z.numpy()}\n")
 
 def test_multi_shrink():
-  a = Tensor.randn(3,2,2).shard(GPUS, axis=0)
-  b = a.shrink(((0,1),None,None))
-  print(b.numpy())
+  a = Tensor.randn(6,2,2).shard(GPUS, axis=0)
+  b = a.shrink(((0,2),None,None))
+  x = b.contiguous()
+  y = x.to("CLANG")
+  z = y.realize()
+  print(z.numpy())
 
 if __name__ == "__main__":
-  test_multi_shrink()
+  ver4()
+  # test_multi_shrink()
