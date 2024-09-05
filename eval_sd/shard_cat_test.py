@@ -76,17 +76,7 @@ def ver4():
   from tinygrad.lazy import LazyBuffer # type: ignore
   from tinygrad.ops import BinaryOps # type: ignore
   from typing import List
-  import functools
-  def get_real_bounds(self:MultiLazyBuffer):
-    real_bounds, count = [], 0
-    for real,(start,end) in zip(self.real, self.bounds):
-      if not real:
-        real_bounds.append((count, count))
-      else:
-        real_bounds.append((count, count + (delta := end - start)))
-        count += delta
-    return real_bounds
-  MultiLazyBuffer.get_real_bounds = get_real_bounds
+  import functools, itertools
   def copy_to_device(self:MultiLazyBuffer, device:str) -> LazyBuffer:
     if self.axis is None:
       # if we already have a copy on the device, return that
@@ -95,7 +85,8 @@ def ver4():
       return self.real_lbs[0].copy_to_device(device)
     # copy lbs to device, pad to final shape, and sum
     llbs:List[LazyBuffer] = []
-    real_bounds = self.get_real_bounds()
+    deltas = [end-start if r else 0 for r,(start,end) in zip(self.real, self.bounds)]
+    real_bounds = [(end-delta, end) for delta, end in zip(deltas, itertools.accumulate(deltas))]
     for lb,real,(start,end) in zip(self.lbs, self.real, real_bounds):
       if not real: continue
       pad_arg = tuple((0,0) if a != self.axis else (start, real_bounds[-1][1]-end) for a in range(len(lb.shape)))
