@@ -33,8 +33,8 @@ def ver2():
   c = c.reshape(a.shape[0]+b.shape[0],*a.shape[1:])
 
 def ver3():
-  a = Tensor.randn(GLOBAL_BS,2,2).pad(((0,GLOBAL_BS),None,None)).shard(GPUS+GPUS).shrink(((0,GLOBAL_BS),None,None))
-  b = Tensor.randn(GLOBAL_BS,2,2).pad(((GLOBAL_BS,0),None,None)).shard(GPUS+GPUS).shrink(((GLOBAL_BS,2*GLOBAL_BS),None,None))
+  a = Tensor.randn(GLOBAL_BS,2,2).pad(((0,GLOBAL_BS),None,None)).shard(GPUS+GPUS, axis=0).shrink(((0,GLOBAL_BS),None,None))
+  b = Tensor.randn(GLOBAL_BS,2,2).pad(((GLOBAL_BS,0),None,None)).shard(GPUS+GPUS, axis=0).shrink(((GLOBAL_BS,2*GLOBAL_BS),None,None))
   c = Tensor.cat(a, b)
   print(f"full thing:\n{c.numpy()}\n")
   for i,v in enumerate(c.chunk(2)):
@@ -143,6 +143,7 @@ def ver5():
   print(f'4: {a.to("CLANG").numpy().shape}')
 
 if __name__ == "__main__":
+  ver3()
   # ver4()
   # test_multi_shrink()
-  ver5()
+  # ver5()
