@@ -3,7 +3,7 @@ from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_
 from tinygrad.helpers import trange
 from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
-from inception import FidInceptionV3 # type: ignore
+from extra.models.inception import FidInceptionV3 # type: ignore
 
 from typing import Tuple, List
 from threading import Thread
@@ -175,7 +175,7 @@ def compute_fid():
 
 
 class Timing:
-  def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {d:.2f} ms")):
+  def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {1e3*d:.2f} ms")):
     self.label = label
     self.collection = collection
     self.print_fnx = print_fnx
@@ -206,7 +206,7 @@ def do_all():
 
   # Load evaluation model
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
-  load_state_dict(clip_enc, torch_load("/home/tiny/tinygrad/weights/pt_inception-2015-12-05-6726825d.pth"), strict=False)
+  load_state_dict(clip_enc, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
   tokenizer = Tokenizer.ClipTokenizer()
   inception = FidInceptionV3().load_from_pretrained()
 
@@ -256,7 +256,7 @@ def do_all():
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
       clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x.to(Device.DEFAULT).realize())
 
-      clip_scores_np = clip_scores.numpy()
+      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
 
       all_incp_actv.append(incp_act.squeeze(3).squeeze(2))
