@@ -5,12 +5,12 @@ from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type:
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from inception import FidInceptionV3 # type: ignore
 
-from typing import Tuple
+from typing import Tuple, List
 from threading import Thread
 import pandas as pd # type: ignore
 import numpy as np
 from PIL import Image
-import time
+import time, os
 
 
 
@@ -174,22 +174,36 @@ def compute_fid():
 
 
 
+class Timing:
+  def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {d:.2f} ms")):
+    self.label = label
+    self.collection = collection
+    self.print_fnx = print_fnx
+  def __enter__(self):
+    self.start_time = time.time()
+  def __exit__(self, *_):
+    self.collection.append(self.print_fnx(self.label, (time.time() - self.start_time)))
+
 def do_all():
   Tensor.manual_seed(42)
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,3)]
+  DEVICE_BS = 1
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
+  SAVE_IMAGES = True
+  SAVE_ROOT = "./output"
+  if not os.path.exists(SAVE_ROOT):
+    os.makedirs(SAVE_ROOT)
 
   # Load generation model
   model = SDXL(configs["SDXL_Base"])
   load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
   for k,w in get_state_dict(model).items():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
-      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
-  
+      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+
   # Load evaluation model
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
   load_state_dict(clip_enc, torch_load("/home/tiny/tinygrad/weights/pt_inception-2015-12-05-6726825d.pth"), strict=False)
@@ -214,35 +228,46 @@ def do_all():
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   while dataset_i < len(captions):
+    timings = []
+
     # Generate Image
-    texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
-    c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
-    for t in  c.values(): t.shard_(GPUS, axis=0)
-    for t in uc.values(): t.shard_(GPUS, axis=0)
-    randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
-    z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
-    x = model.decode(z).realize()
-    x = (x + 1.0) / 2.0
-    x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE)
-    im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).to(Device.DEFAULT)
+    with Timing("gen", timings):
+      texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
+      c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
+      for t in  c.values(): t.shard_(GPUS, axis=0)
+      for t in uc.values(): t.shard_(GPUS, axis=0)
+      randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
+      z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
+      x = model.decode(z)
+      x = (x + 1.0) / 2.0
+      x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
+      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).to(Device.DEFAULT).numpy()
+      pil_im = [Image.fromarray(ten_im[image_i]) for image_i in range(GLOBAL_BS)]
+
+    # Save Images
+    if SAVE_IMAGES:
+      with Timing("save", timings):
+        for idx, im in enumerate(pil_im):
+          im.save(os.path.join(SAVE_ROOT, f"gen_{dataset_i+idx:05d}.png"))
 
     # Evaluate CLIP Score and Inception Activations
-    images = [Image.fromarray(im[image_i]) for image_i in range(GLOBAL_BS)]
-    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
-    clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x.to(Device.DEFAULT).realize())
+    with Timing("eval", timings):
+      images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
+      clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x.to(Device.DEFAULT).realize())
 
-    clip_scores_np = clip_scores.numpy()
-    all_clip_scores += clip_scores_np.tolist()
+      clip_scores_np = clip_scores.numpy()
+      all_clip_scores += clip_scores_np.tolist()
 
-    all_incp_actv.append(incp_act.squeeze(3).squeeze(2))
-    if len(all_incp_actv) >= MAX_INCP_STORE_SIZE:
-      all_incp_actv = [Tensor.cat(*all_incp_actv)]
+      all_incp_actv.append(incp_act.squeeze(3).squeeze(2))
+      if len(all_incp_actv) >= MAX_INCP_STORE_SIZE:
+        all_incp_actv = [Tensor.cat(*all_incp_actv)]
 
     # Print Progress
     dataset_i += GLOBAL_BS
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
-    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean()}")
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean()}, " + ", ".join(timings))
   print("\n" + "="*80 + "\n")
 
   # Print Final CLIP Score
