@@ -46,9 +46,11 @@ def ver4():
   def cat_multi(self:Tensor, *args:Tensor, dim:int=0) -> Tensor:
     if len(args) == 0: return self
     catargs = [self, *args]
-    assert all(isinstance(y.lazydata, MultiLazyBuffer) and all(y.lazydata.real) and (y.lazydata.axis == dim) for y in catargs)
-    assert all(len(self.shape) == len(y.shape) and self.requires_grad == y.requires_grad and self.dtype == y.dtype and all(y.shape[i] == s for i,s in enumerate(self.shape)) for y in args)
-    return Tensor(MultiLazyBuffer(tuple(lb for y in catargs for lb in y.lazydata.lbs), dim), tuple(dev for y in catargs for dev in y.device), self.dtype)
+    if all(isinstance(y.lazydata, MultiLazyBuffer) and all(y.lazydata.real) and (y.lazydata.axis == dim) for y in catargs) \
+        and all(len(self.shape) == len(y.shape) and self.requires_grad == y.requires_grad and self.dtype == y.dtype and \
+                all(y.shape[i] == s for i,s in enumerate(self.shape)) for y in args):
+      return Tensor(MultiLazyBuffer(tuple(lb for y in catargs for lb in y.lazydata.lbs), dim), \
+                    tuple(dev for y in catargs for dev in y.device), self.dtype)
   
   def shrink(self:MultiLazyBuffer, arg:Tuple[Tuple[sint, sint], ...]):
     if self.axis is None or arg[self.axis] == (0, self.shape[self.axis]):
@@ -142,8 +144,18 @@ def ver5():
   print(f'3: {a.numpy().shape}')
   print(f'4: {a.to("CLANG").numpy().shape}')
 
+def ver6():
+  GPUS = tuple([Device.DEFAULT]*2)
+  a = Tensor.rand(8,4).shard(GPUS, axis=0)
+  b, c = a.chunk(2)
+  b = b + Tensor.rand(4,4).shard((GPUS[0],))
+  c = c - Tensor.rand(4,4).shard((GPUS[1],))
+  d = Tensor.cat(b, c)
+  print(d.numpy())
+
 if __name__ == "__main__":
-  ver3()
+  # ver3()
   # ver4()
   # test_multi_shrink()
   # ver5()
+  ver6()
