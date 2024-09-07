@@ -9,6 +9,7 @@ from typing import Tuple, List
 from threading import Thread
 import pandas as pd # type: ignore
 import numpy as np
+from scipy import linalg # type: ignore
 from PIL import Image
 import time, os
 
@@ -174,6 +175,55 @@ def compute_fid():
 
 
 
+
+
+
+
+
+##################################################################
+# TODO: upstream
+FidInceptionV3.m1 = None
+FidInceptionV3.s1 = None
+def compute_score(self:FidInceptionV3, inception_activations:Tensor) -> float:
+  if self.m1 is None or self.s1 is None:
+    with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
+      self.m1, self.s1 = f['mu'][:], f['sigma'][:]
+    assert self.m1 is not None and self.s1 is not None
+  
+  m2 = inception_activations.mean(axis=0).numpy()
+  s2 = np.cov(inception_activations.numpy(), rowvar=False) # FIXME: need to figure out how to do in pure tinygrad
+
+  return calculate_frechet_distance(self.m1, self.s1, m2, s2)
+FidInceptionV3.compute_score = compute_score
+#
+def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
+  mu1 = np.atleast_1d(mu1)
+  mu2 = np.atleast_1d(mu2)
+  sigma1 = np.atleast_2d(sigma1)
+  sigma2 = np.atleast_2d(sigma2)
+  assert mu1.shape == mu2.shape and sigma1.shape == sigma2.shape
+
+  diff = mu1 - mu2
+  covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+  if not np.isfinite(covmean).all():
+    offset = np.eye(sigma1.shape[0]) * eps
+    covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
+
+  if np.iscomplexobj(covmean):
+    if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+      m = np.max(np.abs(covmean.imag))
+      raise ValueError(f"Imaginary component {m}")
+    covmean = covmean.real
+  
+  tr_covmean = np.trace(covmean)
+
+  return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
+#
+##################################################################
+
+
+
+
 class Timing:
   def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {1e3*d:.2f} ms")):
     self.label = label
@@ -187,14 +237,14 @@ class Timing:
 def do_all():
   Tensor.manual_seed(42)
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,3)]
-  DEVICE_BS = 1
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
+  DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
-  SAVE_IMAGES = True
+  SAVE_IMAGES = False
   SAVE_ROOT = "./output"
-  if not os.path.exists(SAVE_ROOT):
+  if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
 
   # Load generation model
@@ -267,7 +317,8 @@ def do_all():
     dataset_i += GLOBAL_BS
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
-    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean()}, " + ", ".join(timings))
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean():.4f}, " + ", ".join(timings))
+
   print("\n" + "="*80 + "\n")
 
   # Print Final CLIP Score
@@ -278,6 +329,7 @@ def do_all():
   fid_score = inception.compute_score(final_incp_acts)
   print(f"fid_score:  {fid_score}")
 
+  print("")
 
 
 if __name__ == "__main__":
