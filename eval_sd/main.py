@@ -1,4 +1,4 @@
-from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
+from tinygrad import Tensor, dtypes, Device, TinyJit, GlobalCounters # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
 from tinygrad.helpers import trange
 from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type: ignore
@@ -30,7 +30,7 @@ LATENT_SIZE = IMG_SIZE // LATENT_SCALE
 assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
 GUIDANCE_SCALE = 8.0
-NUM_STEPS = 20
+NUM_STEPS = 4
 
 def gen_images():
 
@@ -38,8 +38,8 @@ def gen_images():
 
   # Define constants
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
-  DEVICE_BS = 4
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(2)]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   # Load model
@@ -47,7 +47,7 @@ def gen_images():
   load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
   for k,w in get_state_dict(model).items():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
-      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None))
+      w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -79,7 +79,7 @@ def gen_images():
     x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
     x = x.numpy()
 
-    Thread(target=async_save, args=(x,dataset_i)).start()
+    # Thread(target=async_save, args=(x,dataset_i)).start()
 
     dataset_i += GLOBAL_BS
 
@@ -271,6 +271,11 @@ def do_all():
   all_clip_scores = []
   all_incp_actv   = []
 
+  # @TinyJit
+  def decode_step(z:Tensor) -> Tensor:
+    print(f"Pre-decode: {GlobalCounters.global_mem/1e9:.3f}")
+    return model.decode(z).realize()
+
   @TinyJit
   def evaluation_step(tokens:Tensor, images:Tensor, x:Tensor) -> Tuple[Tensor,Tensor]:
     return clip_enc.get_clip_score(tokens, images).realize(), inception(x).realize()
@@ -288,7 +293,7 @@ def do_all():
       for t in uc.values(): t.shard_(GPUS, axis=0)
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
       z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
-      x = model.decode(z)
+      x = decode_step(z.realize())
       x = (x + 1.0) / 2.0
       x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
       ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).to(Device.DEFAULT).numpy()
