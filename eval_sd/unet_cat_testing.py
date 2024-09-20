@@ -12,9 +12,9 @@ NUM_STEPS = 12
 
 class TestCFG(Guider):
   def __call__(self, denoiser, x:Tensor, s:Tensor, c, uc) -> Tensor:
-    sdxl.run = run1
+    # sdxl.run = run1
     x_u = denoiser(x, s, uc)
-    sdxl.run = run2
+    # sdxl.run = run2
     x_c = denoiser(x, s, c)
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
@@ -37,24 +37,24 @@ def main():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16)).realize()
 
-  prompt = "A horse size cat eating a bagel."
-  c, uc = model.create_conditioning([prompt], IMG_SIZE, IMG_SIZE)
-  randn = Tensor.randn(1, 4, LATENT_SIZE, LATENT_SIZE)
-
-  # to_test = [VanillaCFG, SplitVanillaCFG]
+  prompts = ["A horse size cat eating a bagel.", "Photograph of a white and blue bathroom."]
+  # to_test = [VanillaCFG, TestCFG]
   to_test = [TestCFG]
 
-  for guider_cls in to_test:
-    Tensor.manual_seed(42)
-    sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=guider_cls)
-    z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
-    x = model.decode(z).realize()
-    x = (x + 1.0) / 2.0
-    x = x.reshape(1, 3, IMG_SIZE, IMG_SIZE).realize()
-    ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
-    pil_im = Image.fromarray(ten_im[0])
-    pil_im.save(f"./output/test_{guider_cls.__name__}.png")
-    # run.reset()
+  randn = Tensor.randn(1, 4, LATENT_SIZE, LATENT_SIZE)
+  for p_i, prompt in enumerate(prompts):
+    for guider_cls in to_test:
+      Tensor.manual_seed(42)
+      c, uc = model.create_conditioning([prompt], IMG_SIZE, IMG_SIZE)
+      sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=guider_cls)
+      z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
+      x = model.decode(z).realize()
+      x = (x + 1.0) / 2.0
+      x = x.reshape(1, 3, IMG_SIZE, IMG_SIZE).realize()
+      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
+      pil_im = Image.fromarray(ten_im[0])
+      pil_im.save(f"./output/test_{guider_cls.__name__}_{p_i}.png")
+      # run.reset()
 
 if __name__ == "__main__":
   main()
