@@ -30,7 +30,10 @@ def main():
   c, uc = model.create_conditioning([prompt], IMG_SIZE, IMG_SIZE)
   randn = Tensor.randn(1, 4, LATENT_SIZE, LATENT_SIZE)
 
-  for guider_cls in [VanillaCFG, SplitVanillaCFG]:
+  # to_test = [VanillaCFG, SplitVanillaCFG]
+  to_test = [TestCFG]
+
+  for guider_cls in to_test:
     Tensor.manual_seed(42)
     sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=guider_cls)
     z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
@@ -40,7 +43,7 @@ def main():
     ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
     pil_im = Image.fromarray(ten_im[0])
     pil_im.save(f"./output/test_{guider_cls.__name__}.png")
-    run.reset()
+    # run.reset()
 
 if __name__ == "__main__":
   main()
