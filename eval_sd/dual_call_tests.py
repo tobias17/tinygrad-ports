@@ -16,6 +16,9 @@ def make_calls(func:Callable[[Tensor,Tensor],Tensor], b1_i1:Tensor, b2_i1:Tensor
   np.testing.assert_allclose(x2.numpy(), y2.numpy())
 
 class Dual_Call_Tests(unittest.TestCase):
+  def setUp(self):
+    Tensor.manual_seed(42)
+
   def test_1(self):
     make_calls(Tensor.add, *make_input(1, 32, count=4))
 
