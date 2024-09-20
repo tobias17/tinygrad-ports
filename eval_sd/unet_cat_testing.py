@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes, fetch, TinyJit
 from tinygrad.nn.state import load_state_dict, get_state_dict, safe_load
-from examples.sdxl import SDXL, configs, DPMPP2MSampler, Guider, VanillaCFG, SplitVanillaCFG # type: ignore
+from examples.sdxl import SDXL, configs, DPMPP2MSampler, Guider, VanillaCFG, SplitVanillaCFG, append_dims, timestep_embedding # type: ignore
 from PIL import Image
 
 from examples import sdxl # type: ignore
@@ -26,6 +26,37 @@ def run1(model, x, tms, ctx, y, c_out, add):
 def run2(model, x, tms, ctx, y, c_out, add):
   return (model(x, tms, ctx, y)*c_out + add).realize()
 
+
+
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond) -> Tensor:
+
+  def sigma_to_idx(s:Tensor) -> Tensor:
+    dists = s - self.sigmas.unsqueeze(1)
+    return dists.abs().argmin(axis=0).view(*s.shape)
+
+  sigma = self.sigmas[sigma_to_idx(sigma)]
+  sigma_shape = sigma.shape
+  sigma = append_dims(sigma, x)
+
+  c_out = -sigma
+  c_in  = 1 / (sigma**2 + 1.0) ** 0.5
+  tms   = sigma_to_idx(sigma.reshape(sigma_shape))
+  t_emb = timestep_embedding(tms, self.model.diffusion_model.model_ch).cast(dtypes.float16)
+
+  def prep(*tensors:Tensor):
+    return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
+  args = prep(x*c_in, t_emb, cond["crossattn"], cond["vector"], c_out, x)
+  if not self.warmed_up:
+    for _ in range(4):
+      run1(self.model.diffusion_model.pre_embedded, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
+    self.warmed_up = True
+
+  return run1(self.model.diffusion_model.pre_embedded, *args)
+SDXL.denoise = denoise
+SDXL.warmed_up = False
+
+
 def main():
   Tensor.manual_seed(42)
 
@@ -37,7 +68,7 @@ def main():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16)).realize()
 
-  prompts = ["A horse size cat eating a bagel.", "Photograph of a white and blue bathroom."]
+  prompts = ["A horse size cat eating a bagel.", "Photograph of a white and blue bathroom."][:1]
   # to_test = [VanillaCFG, TestCFG]
   to_test = [TestCFG]
 
