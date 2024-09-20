@@ -1,12 +1,17 @@
-from tinygrad import Tensor
+from tinygrad import Tensor, dtypes, nn
 from tinygrad.nn.state import get_parameters
 from extra.models.unet import CrossAttention # type: ignore
 from typing import List, Callable
 import numpy as np
 import unittest
 
-def make_input(*shape:int, count:int=1) -> List[Tensor]:
-  return [Tensor.rand(*shape) for _ in range(count)]
+def make_input(*shape:int, count:int=1, dtype=dtypes.float16) -> List[Tensor]:
+  return [Tensor.rand(*shape, dtype=dtype) for _ in range(count)]
+
+def randomize_weights(model):
+  for w in get_parameters(model):
+    w.replace(Tensor.rand(*w.shape)).realize()
+  return model
 
 def make_calls(func:Callable[[Tensor,Tensor],Tensor], b1_i1:Tensor, b2_i1:Tensor, b1_i2:Tensor, b2_i2:Tensor):
   x1, x2 = func(Tensor.cat(b1_i1, b2_i1), Tensor.cat(b1_i2, b2_i2)).chunk(2)
@@ -19,10 +24,14 @@ class Dual_Call_Tests(unittest.TestCase):
   def setUp(self):
     Tensor.manual_seed(42)
 
-  def test_1(self):
+  def test_add(self):
     make_calls(Tensor.add, *make_input(1, 32, count=4))
 
-  def test_2(self):
+  def test_linear(self):
+    l = randomize_weights(nn.Linear(32, 8))
+    make_calls((lambda x,y: l(x)+l(y)), *make_input(1, 32, count=4))
+
+  def test_cross_attention(self):
     ca = CrossAttention(32, 64, 4, 8)
     for p in get_parameters(ca):
       p.replace(Tensor.rand(*p.shape)).realize()
