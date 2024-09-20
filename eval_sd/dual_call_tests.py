@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.nn.state import get_parameters
-from extra.models.unet import CrossAttention, BasicTransformerBlock # type: ignore
+from extra.models.unet import CrossAttention, BasicTransformerBlock, SpatialTransformer # type: ignore
 from typing import List, Callable
 import numpy as np
 import unittest
@@ -42,6 +42,10 @@ class Dual_Call_Tests(unittest.TestCase):
   def test_basic_transformer_block(self):
     btb = randomize_weights(BasicTransformerBlock(32, 64, 4, 8))
     make_calls(btb, *make_input(1, 4, 32, count=2), *make_input(1, 4, 64, count=2))
+
+  def test_spatial_transformer(self):
+    st = randomize_weights(SpatialTransformer(16, 8, 2, 32, True))
+    make_calls(st, *make_input(1, 16, 8, 8, count=2), *make_input(1, 4, 32, count=2))
 
 if __name__ == "__main__":
   unittest.main()
