@@ -1,7 +1,9 @@
-from tinygrad import Tensor, dtypes, fetch
+from tinygrad import Tensor, dtypes, fetch, TinyJit
 from tinygrad.nn.state import load_state_dict, get_state_dict, safe_load
-from examples.sdxl import SDXL, configs, DPMPP2MSampler, Guider, VanillaCFG, SplitVanillaCFG, run # type: ignore
+from examples.sdxl import SDXL, configs, DPMPP2MSampler, Guider, VanillaCFG, SplitVanillaCFG # type: ignore
 from PIL import Image
+
+from examples import sdxl # type: ignore
 
 IMG_SIZE = 1024
 LATENT_SIZE = IMG_SIZE // 8
@@ -10,10 +12,19 @@ NUM_STEPS = 12
 
 class TestCFG(Guider):
   def __call__(self, denoiser, x:Tensor, s:Tensor, c, uc) -> Tensor:
+    sdxl.run = run1
     x_u = denoiser(x, s, uc)
+    sdxl.run = run2
     x_c = denoiser(x, s, c)
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
+
+@TinyJit
+def run1(model, x, tms, ctx, y, c_out, add):
+  return (model(x, tms, ctx, y)*c_out + add).realize()
+@TinyJit
+def run2(model, x, tms, ctx, y, c_out, add):
+  return (model(x, tms, ctx, y)*c_out + add).realize()
 
 def main():
   Tensor.manual_seed(42)
