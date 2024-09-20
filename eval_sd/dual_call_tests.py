@@ -32,11 +32,12 @@ class Dual_Call_Tests(unittest.TestCase):
     make_calls((lambda x,y: l(x)+l(y)), *make_input(1, 32, count=4))
 
   def test_cross_attention(self):
-    ca = CrossAttention(32, 64, 4, 8)
-    for p in get_parameters(ca):
-      p.replace(Tensor.rand(*p.shape)).realize()
-    
+    ca = randomize_weights(CrossAttention(32, 64, 4, 8))
     make_calls(ca, *make_input(1, 32, count=2), *make_input(1, 64, count=2))
+
+  def test_self_attention(self):
+    ca = randomize_weights(CrossAttention(32, 32, 4, 8))
+    make_calls((lambda x,y: ca(x)+ca(y)), *make_input(1, 32, count=4))
 
 if __name__ == "__main__":
   unittest.main()
