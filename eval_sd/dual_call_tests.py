@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes, nn
 from tinygrad.nn.state import get_parameters
-from extra.models.unet import CrossAttention, BasicTransformerBlock, SpatialTransformer # type: ignore
+from extra.models.unet import CrossAttention, BasicTransformerBlock, SpatialTransformer, UNetModel # type: ignore
 from typing import List, Callable
 import numpy as np
 import unittest
@@ -46,6 +46,20 @@ class Dual_Call_Tests(unittest.TestCase):
   def test_spatial_transformer(self):
     st = randomize_weights(SpatialTransformer(16, 8, 2, 32, True))
     make_calls(st, *make_input(1, 16, 8, 8, count=2), *make_input(1, 4, 32, count=2))
+
+  def test_unet(self):
+    params = {"adm_in_ch": 32, "in_ch": 4, "out_ch": 4, "model_ch": 128, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 16, "transformer_depth": [1, 2, 10], "ctx_dim": 88, "use_linear": True}
+    unet = randomize_weights(UNetModel(**params))
+    b1_x, b2_x = make_input(1, 4, 32, 32, count=2)
+    b1_y, b2_y = make_input(1, 32, count=2)
+    b1_c, b2_c = make_input(1, 17, 88, count=2)
+
+    tms = Tensor([50.0])
+    b1_t, b2_t = unet(Tensor.cat(b1_x, b2_x), Tensor.cat(tms, tms), Tensor.cat(b1_c, b2_c), Tensor.cat(b1_y, b2_y)).chunk(2)
+    b1_s, b2_s = unet(b1_x, tms, b1_c, b1_y), unet(b2_x, tms, b2_c, b2_y)
+
+    np.testing.assert_allclose(b1_t.numpy(), b1_s.numpy(), atol=1e-6, rtol=1e-3)
+    np.testing.assert_allclose(b2_t.numpy(), b2_s.numpy(), atol=1e-6, rtol=1e-3)
 
 if __name__ == "__main__":
   unittest.main()
