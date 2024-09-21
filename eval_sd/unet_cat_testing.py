@@ -19,7 +19,7 @@ class TestCFG(Guider):
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
 
-@TinyJit
+# @TinyJit
 def run1(model, x, tms, ctx, y, c_out, add):
   return (model(x, tms, ctx, y)*c_out + add).realize()
 @TinyJit
@@ -48,7 +48,8 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond) -> Tensor:
 
   args = prep(x*c_in, t_emb, cond["crossattn"], cond["vector"], c_out, x)
   if not self.warmed_up:
-    for _ in range(4):
+    for i in range(4):
+      print(f"Warmup {i+1}")
       run1(self.model.diffusion_model.pre_embedded, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
     self.warmed_up = True
 
@@ -68,14 +69,14 @@ def main():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16)).realize()
 
-  prompts = ["A horse size cat eating a bagel.", "Photograph of a white and blue bathroom."][:1]
+  prompts = ["A horse size cat eating a bagel.", "Photograph of a white and blue bathroom."][:]
   # to_test = [VanillaCFG, TestCFG]
   to_test = [TestCFG]
 
-  randn = Tensor.randn(1, 4, LATENT_SIZE, LATENT_SIZE)
   for p_i, prompt in enumerate(prompts):
     for guider_cls in to_test:
       Tensor.manual_seed(42)
+      randn = Tensor.randn(1, 4, LATENT_SIZE, LATENT_SIZE)
       c, uc = model.create_conditioning([prompt], IMG_SIZE, IMG_SIZE)
       sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=guider_cls)
       z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
