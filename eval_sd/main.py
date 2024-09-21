@@ -1,4 +1,5 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit, GlobalCounters # type: ignore
+from tinygrad.multi import MultiLazyBuffer
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
 from tinygrad.helpers import trange
 from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims, run # type: ignore
@@ -29,7 +30,7 @@ LATENT_SIZE = IMG_SIZE // LATENT_SCALE
 assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
 GUIDANCE_SCALE = 8.0
-NUM_STEPS = 4
+NUM_STEPS = 20
 
 def gen_images():
 
@@ -245,7 +246,10 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, warm_up:bool=False) ->
   args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], c_out, x)
   if warm_up and not self.warmed_up:
     for _ in range(3):
-      run(self.model.diffusion_model, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
+      def randomize(x:Tensor):
+        base = Tensor.rand(x.shape, dtype=x.dtype)
+        return base.shard(x.lazydata.device, x.lazydata.axis) if isinstance(x.lazydata, MultiLazyBuffer) else base
+      run(self.model.diffusion_model, *[randomize(a).realize() for a in args])
     self.warmed_up = True
   return run(self.model.diffusion_model, *args)
 SDXL.denoise = denoise
@@ -275,8 +279,8 @@ class Timing:
 def do_all():
   Tensor.manual_seed(42)
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in [1]]
-  DEVICE_BS = 1
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in [1,2]]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
@@ -311,7 +315,6 @@ def do_all():
 
   # @TinyJit
   def decode_step(z:Tensor) -> Tensor:
-    print(f"Pre-decode: {GlobalCounters.global_mem/1e9:.3f}")
     return model.decode(z).realize()
 
   @TinyJit
@@ -361,6 +364,7 @@ def do_all():
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean():.4f}, " + ", ".join(timings))
+    assert False
 
   print("\n" + "="*80 + "\n")
 
