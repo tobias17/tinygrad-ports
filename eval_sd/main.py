@@ -244,10 +244,10 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, warm_up:bool=False) ->
 
   args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], c_out, x)
   if warm_up and not self.warmed_up:
-    for i in range(3):
-      run(self.model.diffusion_model.pre_embedded, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
+    for _ in range(3):
+      run(self.model.diffusion_model, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
     self.warmed_up = True
-  return run(self.model.diffusion_model.pre_embedded, *args)
+  return run(self.model.diffusion_model, *args)
 SDXL.denoise = denoise
 SDXL.warmed_up = False
 #

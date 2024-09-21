@@ -41,19 +41,18 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond) -> Tensor:
   c_out = -sigma
   c_in  = 1 / (sigma**2 + 1.0) ** 0.5
   tms   = sigma_to_idx(sigma.reshape(sigma_shape))
-  t_emb = timestep_embedding(tms, self.model.diffusion_model.model_ch).cast(dtypes.float16)
 
   def prep(*tensors:Tensor):
     return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-  args = prep(x*c_in, t_emb, cond["crossattn"], cond["vector"], c_out, x)
+  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], c_out, x)
   if not self.warmed_up:
-    for i in range(4):
+    for i in range(3):
       print(f"Warmup {i+1}")
-      run1(self.model.diffusion_model.pre_embedded, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
+      run1(self.model.diffusion_model, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
     self.warmed_up = True
 
-  return run1(self.model.diffusion_model.pre_embedded, *args)
+  return run1(self.model.diffusion_model, *args)
 SDXL.denoise = denoise
 SDXL.warmed_up = False
 
