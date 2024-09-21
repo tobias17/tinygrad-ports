@@ -226,7 +226,11 @@ def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray
 
 ##################################################################
 # TODO: upstream
-def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, warm_up:bool=False) -> Tensor:
+@TinyJit
+def run2(model, x, tms, ctx, y):
+  return (model(x, tms, ctx, y)).realize()
+#
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
 
   def sigma_to_idx(s:Tensor) -> Tensor:
     dists = s - self.sigmas.unsqueeze(1)
@@ -243,22 +247,14 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, warm_up:bool=False) ->
   def prep(*tensors:Tensor):
     return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], c_out, x)
-  if warm_up and not self.warmed_up:
-    for _ in range(3):
-      def randomize(x:Tensor):
-        base = Tensor.rand(x.shape, dtype=x.dtype)
-        return base.shard(x.lazydata.device, x.lazydata.axis) if isinstance(x.lazydata, MultiLazyBuffer) else base
-      run(self.model.diffusion_model, *[randomize(a).realize() for a in args])
-    self.warmed_up = True
-  return run(self.model.diffusion_model, *args)
+  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"])
+  return (run2(self.model.diffusion_model, *args)*c_out + x).realize()
 SDXL.denoise = denoise
-SDXL.warmed_up = False
 #
 class SplitVanillaCFG(Guider):
   def __call__(self, denoiser, x:Tensor, s:Tensor, c:Dict, uc:Dict) -> Tensor:
-    x_u = denoiser(x, s, uc, warm_up=True)
-    x_c = denoiser(x, s, c,  warm_up=True)
+    x_u = denoiser(x, s, uc)
+    x_c = denoiser(x, s, c)
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
 #
