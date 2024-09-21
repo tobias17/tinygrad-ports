@@ -237,12 +237,12 @@ class Timing:
 def do_all():
   Tensor.manual_seed(42)
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in [1]]
+  DEVICE_BS = 1
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
-  SAVE_IMAGES = False
+  SAVE_IMAGES = True
   SAVE_ROOT = "./output"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
