@@ -8,18 +8,10 @@ def run(x:Tensor, y:Tensor):
 Tensor.manual_seed(1234)
 sigmas = Tensor.rand(500).realize()
 
-def sigma_to_idx(s:Tensor) -> Tensor:
-  dists = s - sigmas
-  return dists.abs().argmin(axis=0).view(*s.shape)
-
 def make_call() -> Tensor:
   Tensor.manual_seed(1234)
   sigma = Tensor.rand(1)
-  sigma = sigmas[sigma_to_idx(sigma)]
-  c_out = -sigma
-
-  x = Tensor.rand(64)
-  return run((x * Tensor.rand(64)).realize(), Tensor.rand(64).realize()) * c_out
+  return run(Tensor.rand(64).realize(), Tensor.rand(64).realize()) * sigma
 
 def create_block(realize:bool=True):
   values = [] # type: ignore
@@ -28,7 +20,7 @@ def create_block(realize:bool=True):
     if realize:
       o1.realize()
       o2.realize()
-    h = o1 + 8.0*(o2 - o1)
+    h = o1 + o2
     values.append(h.numpy())
   return values
 
