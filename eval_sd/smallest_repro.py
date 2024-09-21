@@ -1,6 +1,6 @@
 from tinygrad import Tensor, TinyJit, dtypes
 from tinygrad.nn.state import get_parameters
-from examples.sdxl import append_dims
+from examples.sdxl import append_dims # type: ignore
 from extra.models.unet import UNetModel # type: ignore
 import numpy as np
 
@@ -21,12 +21,8 @@ def sigma_to_idx(s:Tensor) -> Tensor:
   dists = s - sigmas
   return dists.abs().argmin(axis=0).view(*s.shape)
 
-def make_call() -> Tensor:
+def make_call(x, y, ctx) -> Tensor:
   Tensor.manual_seed(1234)
-  x   = Tensor.rand(1, 4, 32, 32)
-  y   = Tensor.rand(1, 32)
-  ctx = Tensor.rand(1, 17, 88)
-
   sigma = Tensor.rand(1)
   sigma_shape = sigma.shape
   sigma = sigmas[sigma_to_idx(sigma)]
@@ -40,16 +36,29 @@ def make_call() -> Tensor:
     return tuple(t.cast(dtypes.float16).realize() for t in tensors)
   return run(*prep(x*c_in, tms, ctx, y)) * c_out + x
 
-def create_block(realize:bool=True):
-  values = [] # type: ignore
-  for _ in range(10):
-    o1, o2 = make_call(), make_call()
-    if realize:
-      o1.realize()
-      o2.realize()
-    h = o1 + 8.0*(o2 - o1)
-    values.append(h.numpy())
-  return values
+def create_entry(x, y, ctx, realize):
+  o1, o2 = make_call(x, y, ctx), make_call(x, y, ctx)
+  if realize:
+    o1.realize()
+    o2.realize()
+  h = o1 + 8.0*(o2 - o1)
+  return h.numpy()
 
-for v1, v2 in zip(create_block(True), create_block(False)):
-  np.testing.assert_allclose(v1, v2, atol=1e-5, rtol=1e-5)
+dual_realize = False
+
+Tensor.manual_seed(1234)
+y_1   = Tensor.rand(1, 32)
+ctx_1 = Tensor.rand(1, 17, 88)
+y_2   = Tensor.rand(1, 32)
+ctx_2 = Tensor.rand(1, 17, 88)
+
+values_1 = []
+values_2 = []
+
+for _ in range(10):
+  x = Tensor.rand(1, 4, 32, 32)
+  values_1.append(create_entry(x, y_1, ctx_1, True))
+  values_2.append(create_entry(x, y_2, ctx_2, dual_realize))
+
+for v1, v2 in zip(values_1, values_2):
+  np.testing.assert_allclose(v1, v2)
