@@ -153,9 +153,48 @@ def ver6():
   d = Tensor.cat(b, c)
   print(d.numpy())
 
+def ver7():
+  a = Tensor.rand(4,4).shard(('NV:1','NV:2','NV:1','NV:2'), axis=0)
+  b = Tensor.rand(4,4).shard(('NV:1','NV:2'), axis=None)
+  c = a * b
+
+def ver8():
+  from tinygrad.nn import Linear
+  from tinygrad.nn.state import get_state_dict
+
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(4)]
+  DEVICE_BS = 2
+  GLOBAL_BS = DEVICE_BS * len(GPUS)
+
+  class Model:
+    def __init__(self, size:int):
+      self.in_1 = Linear(size, size*2)
+      self.in_2 = Linear(size, size*2)
+      self.out  = Linear(size*2, size)
+    def __call__(self, x, cond):
+      return self.out(self.in_1(x) + self.in_2(cond))
+
+  model = Model(10)
+  for w in get_state_dict(model).values():
+    w.shard_(GPUS, axis=None)
+
+  ITERATIONS = 10
+  x      = Tensor.randn(GLOBAL_BS,10).shard(GPUS, axis=0)
+  cond_u = Tensor.zeros(GLOBAL_BS,10).shard(GPUS, axis=0)
+  cond_c = Tensor.randn(GLOBAL_BS,10).shard(GPUS, axis=0)
+  for i in range(ITERATIONS):
+    # latent_u, latent_c = model(Tensor.cat(x, x), Tensor.cat(cond_u, cond_c)).chunk(2)
+    latent_u = model(x, cond_u)
+    latent_c = model(x, cond_c)
+    scaled = latent_u + 8.0 * (latent_c - latent_u)
+    x = x + ((1.0 / ITERATIONS) * (x - scaled))
+  print(x.numpy())
+
 if __name__ == "__main__":
   # ver3()
   # ver4()
   # test_multi_shrink()
   # ver5()
-  ver6()
+  # ver6()
+  # ver7()
+  ver8()

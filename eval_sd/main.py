@@ -1,12 +1,11 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit, GlobalCounters # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
 from tinygrad.helpers import trange
-from examples.sdxl import SDXL, DPMPP2MSampler, SplitVanillaCFG, configs # type: ignore
+from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims, run # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
 
-from typing import Tuple, List
-from threading import Thread
+from typing import Tuple, List, Dict
 import pandas as pd # type: ignore
 import numpy as np
 from scipy import linalg # type: ignore
@@ -221,6 +220,45 @@ def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray
 #
 ##################################################################
 
+
+
+
+##################################################################
+# TODO: upstream
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, warm_up:bool=False) -> Tensor:
+
+  def sigma_to_idx(s:Tensor) -> Tensor:
+    dists = s - self.sigmas.unsqueeze(1)
+    return dists.abs().argmin(axis=0).view(*s.shape)
+
+  sigma = self.sigmas[sigma_to_idx(sigma)]
+  sigma_shape = sigma.shape
+  sigma = append_dims(sigma, x)
+
+  c_out = -sigma
+  c_in  = 1 / (sigma**2 + 1.0) ** 0.5
+  tms   = sigma_to_idx(sigma.reshape(sigma_shape))
+
+  def prep(*tensors:Tensor):
+    return tuple(t.cast(dtypes.float16).realize() for t in tensors)
+
+  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], c_out, x)
+  if warm_up and not self.warmed_up:
+    for _ in range(3):
+      run(self.model.diffusion_model, *[Tensor.rand(a.shape, dtype=a.dtype, device=a.device).realize() for a in args])
+    self.warmed_up = True
+  return run(self.model.diffusion_model, *args)
+SDXL.denoise = denoise
+SDXL.warmed_up = False
+#
+class SplitVanillaCFG(Guider):
+  def __call__(self, denoiser, x:Tensor, s:Tensor, c:Dict, uc:Dict) -> Tensor:
+    x_u = denoiser(x, s, uc, warm_up=True)
+    x_c = denoiser(x, s, c,  warm_up=True)
+    x_pred = x_u + self.scale*(x_c - x_u)
+    return x_pred
+#
+##################################################################
 
 
 
