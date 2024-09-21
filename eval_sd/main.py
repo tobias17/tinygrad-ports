@@ -11,6 +11,7 @@ import pandas as pd # type: ignore
 import numpy as np
 from scipy import linalg # type: ignore
 from PIL import Image
+from threading import Thread
 import time, os
 
 
@@ -263,7 +264,7 @@ class SplitVanillaCFG(Guider):
 
 
 class Timing:
-  def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {1e3*d:.2f} ms")):
+  def __init__(self, label:str, collection:List[str], print_fnx=(lambda l,d: f"{l}: {1e3*d:.1f} ms")):
     self.label = label
     self.collection = collection
     self.print_fnx = print_fnx
@@ -275,13 +276,13 @@ class Timing:
 def do_all():
   Tensor.manual_seed(42)
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in [1,2]]
-  DEVICE_BS = 2
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
+  DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
   SAVE_IMAGES = True
-  SAVE_ROOT = "./output"
+  SAVE_ROOT = "./output/rendered"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
 
@@ -309,7 +310,11 @@ def do_all():
   all_clip_scores = []
   all_incp_actv   = []
 
-  # @TinyJit
+  def async_save(images:List[Image.Image], global_i:int):
+    for image_i, im in enumerate(images):
+      im.save(f"{SAVE_ROOT}/gen_{global_i+image_i:05d}.png")
+
+  @TinyJit
   def decode_step(z:Tensor) -> Tensor:
     return model.decode(z).realize()
 
@@ -329,18 +334,18 @@ def do_all():
       for t in  c.values(): t.shard_(GPUS, axis=0)
       for t in uc.values(): t.shard_(GPUS, axis=0)
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
-      z = sampler(model.denoise, randn, c, uc, NUM_STEPS)
+      z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
+
+    with Timing("dec", timings):
       x = decode_step(z.realize())
       x = (x + 1.0) / 2.0
       x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
-      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).to(Device.DEFAULT).numpy()
+      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
       pil_im = [Image.fromarray(ten_im[image_i]) for image_i in range(GLOBAL_BS)]
 
     # Save Images
     if SAVE_IMAGES:
-      with Timing("save", timings):
-        for idx, im in enumerate(pil_im):
-          im.save(os.path.join(SAVE_ROOT, f"gen_{dataset_i+idx:05d}.png"))
+      Thread(target=async_save, args=(pil_im,dataset_i)).start()
 
     # Evaluate CLIP Score and Inception Activations
     with Timing("eval", timings):
@@ -360,7 +365,6 @@ def do_all():
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/len(captions))) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}, clip: {clip_scores_np.mean():.4f}, " + ", ".join(timings))
-    assert False
 
   print("\n" + "="*80 + "\n")
 
