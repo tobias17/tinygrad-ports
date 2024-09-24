@@ -138,7 +138,7 @@ def compute_fid():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-  TEST_SIZE = 30_000
+  TEST_SIZE = 3_000
   Tensor.no_grad = True
 
   inception = FidInceptionV3().load_from_pretrained()
@@ -153,7 +153,7 @@ def compute_fid():
   while dataset_i < TEST_SIZE:
     images = []
     for image_i in trange(GLOBAL_BS):
-      im = Image.open(f"inputs/gen_{dataset_i+image_i:05d}.png")
+      im = Image.open(f"output/rendered/gen_{dataset_i+image_i:05d}.png")
       images.append(Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0))
 
     x = Tensor.cat(*images, dim=0).shard(GPUS, axis=0)
@@ -336,6 +336,7 @@ def do_all():
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
       z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
 
+    # Decode Images
     with Timing("dec", timings):
       x = decode_step(z.realize())
       x = (x + 1.0) / 2.0
@@ -380,4 +381,4 @@ def do_all():
 
 
 if __name__ == "__main__":
-  do_all()
+  compute_fid()
