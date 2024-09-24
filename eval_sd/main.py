@@ -31,7 +31,7 @@ LATENT_SIZE = IMG_SIZE // LATENT_SCALE
 assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
 GUIDANCE_SCALE = 8.0
-NUM_STEPS = 20
+NUM_STEPS = 12
 
 def gen_images():
 
@@ -138,7 +138,7 @@ def compute_fid():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-  TEST_SIZE = 30_000
+  TEST_SIZE = 600 # 30_000
   Tensor.no_grad = True
 
   inception = FidInceptionV3().load_from_pretrained()
@@ -170,8 +170,8 @@ def compute_fid():
     eta_time = (wall_time_delta / (dataset_i/TEST_SIZE)) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/TEST_SIZE:02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
-  final_incp_act = Tensor.cat(*all_incp_act, dim=0)
-  fid_score = inception.compute_score(final_incp_act)
+  final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
+  fid_score = inception.compute_score(final_incp_acts)
   print(f"fid_score:  {fid_score}")
 
 
@@ -277,12 +277,12 @@ def do_all():
   Tensor.manual_seed(42)
   Tensor.no_grad = True
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,3)]
-  DEVICE_BS = 2
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
+  DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
-  SAVE_IMAGES = True
+  SAVE_IMAGES = False
   SAVE_ROOT = "./output/rendered"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
@@ -327,7 +327,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < len(captions):
+  while dataset_i < 500: #len(captions):
     timings = []
 
     # Generate Image
@@ -355,12 +355,13 @@ def do_all():
     with Timing("eval", timings):
       images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
-
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x_pil.realize())
+      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
+
+      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      incp_act = inception_step(inception, x_pil.realize())
 
       all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
@@ -386,4 +387,4 @@ def do_all():
 
 
 if __name__ == "__main__":
-  compute_fid()
+  do_all()
