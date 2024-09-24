@@ -138,7 +138,7 @@ def compute_fid():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-  TEST_SIZE = 3_000
+  TEST_SIZE = 30_000
   Tensor.no_grad = True
 
   inception = FidInceptionV3().load_from_pretrained()
@@ -146,7 +146,7 @@ def compute_fid():
     w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
   
   wall_time_start = time.time()
-  inc_act = []
+  all_incp_act = []
 
   dataset_i = 0
   assert TEST_SIZE % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide TEST_SIZE ({TEST_SIZE}) for now"
@@ -158,11 +158,11 @@ def compute_fid():
 
     x = Tensor.cat(*images, dim=0).shard(GPUS, axis=0)
 
-    inc_out = inception_step(inception, x.realize())
-    inc_act.append(inc_out.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
+    incp_act = inception_step(inception, x.realize())
+    all_incp_act.append(incp_act.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
 
-    if len(inc_act) > 20:
-      inc_act = [Tensor.cat(*inc_act, dim=0).realize()]
+    if len(all_incp_act) > 4:
+      all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
 
     dataset_i += GLOBAL_BS
 
@@ -170,8 +170,8 @@ def compute_fid():
     eta_time = (wall_time_delta / (dataset_i/TEST_SIZE)) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/TEST_SIZE:02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
 
-  inception_act = Tensor.cat(*inc_act, dim=0)
-  fid_score = inception.compute_score(inception_act)
+  final_incp_act = Tensor.cat(*all_incp_act, dim=0)
+  fid_score = inception.compute_score(final_incp_act)
   print(f"fid_score:  {fid_score}")
 
 
@@ -275,9 +275,10 @@ class Timing:
 
 def do_all():
   Tensor.manual_seed(42)
+  Tensor.no_grad = True
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,3)]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
@@ -298,6 +299,8 @@ def do_all():
   load_state_dict(clip_enc, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
   tokenizer = Tokenizer.ClipTokenizer()
   inception = FidInceptionV3().load_from_pretrained()
+  for w in get_state_dict(inception).values():
+    w.replace(w.cast(dtypes.float16)).realize()
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -308,7 +311,7 @@ def do_all():
 
   wall_time_start = time.time()
   all_clip_scores = []
-  all_incp_actv   = []
+  all_incp_act    = []
 
   def async_save(images:List[Image.Image], global_i:int):
     for image_i, im in enumerate(images):
@@ -352,14 +355,16 @@ def do_all():
     with Timing("eval", timings):
       images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
-      clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x.to(Device.DEFAULT).realize())
+
+      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      clip_scores, incp_act = evaluation_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize(), x_pil.realize())
 
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
 
-      all_incp_actv.append(incp_act.squeeze(3).squeeze(2))
-      if len(all_incp_actv) >= MAX_INCP_STORE_SIZE:
-        all_incp_actv = [Tensor.cat(*all_incp_actv)]
+      all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
+      if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
+        all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
 
     # Print Progress
     dataset_i += GLOBAL_BS
@@ -373,7 +378,7 @@ def do_all():
   print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores)}")
 
   # Compute Final FID Score
-  final_incp_acts = Tensor.cat(*all_incp_actv, dim=0)
+  final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
   fid_score = inception.compute_score(final_incp_acts)
   print(f"fid_score:  {fid_score}")
 
