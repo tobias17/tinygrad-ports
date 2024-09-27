@@ -145,14 +145,15 @@ def load_inception_model(gpus=None) -> FidInceptionV3:
 
 def get_incp_act(model:FidInceptionV3, pil_ims:List[Image.Image], gpus=None):
   images = [Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_ims]
-  x = Tensor.cat(*images, dim=0)
+  x = Tensor.cat(*images, dim=0).realize()
   if gpus:
     x = x.shard(gpus, axis=0)
+  print(f"input_shape: {x.shape}")
   incp_act = inception_step(model, x.realize())
-  return incp_act.squeeze(3).squeeze(2).to(Device.DEFAULT).realize()
+  return incp_act.to(Device.DEFAULT).reshape(incp_act.shape[:2]).realize()
 
 def compute_fid():
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(2)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   TEST_SIZE = 300 # 30_000
@@ -177,6 +178,8 @@ def compute_fid():
     wall_time_delta = time.time() - wall_time_start
     eta_time = (wall_time_delta / (dataset_i/TEST_SIZE)) - wall_time_delta
     print(f"{dataset_i:05d}: {100.0*dataset_i/TEST_SIZE:02.2f}%, elapsed wall time: {smart_print(wall_time_delta)}, eta: {smart_print(eta_time)}")
+
+  print("\n" + "="*80 + "\n")
 
   final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
   fid_score = inception.compute_score(final_incp_acts)
