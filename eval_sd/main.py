@@ -31,7 +31,7 @@ LATENT_SIZE = IMG_SIZE // LATENT_SCALE
 assert LATENT_SIZE * LATENT_SCALE == IMG_SIZE
 
 GUIDANCE_SCALE = 8.0
-NUM_STEPS = 12
+NUM_STEPS = 20
 
 def gen_images():
 
@@ -130,9 +130,7 @@ def compute_clip():
 
 
 
-@TinyJit
-def inception_step(model:FidInceptionV3, x:Tensor) -> Tensor:
-  return model(x).realize()
+
 
 def load_inception_model(gpus=None) -> FidInceptionV3:
   inception = FidInceptionV3().load_from_pretrained()
@@ -149,11 +147,11 @@ def get_incp_act(model:FidInceptionV3, pil_ims:List[Image.Image], gpus=None):
   if gpus:
     x = x.shard(gpus, axis=0)
   print(f"input_shape: {x.shape}")
-  incp_act = inception_step(model, x.realize())
+  incp_act = model(x.realize())
   return incp_act.to(Device.DEFAULT).reshape(incp_act.shape[:2]).realize()
 
 def compute_fid():
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(2)]
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
   TEST_SIZE = 300 # 30_000
@@ -185,6 +183,7 @@ def compute_fid():
   fid_score = inception.compute_score(final_incp_acts)
   print(f"fid_score:  {fid_score}")
 
+  print("")
 
 
 
@@ -293,8 +292,8 @@ def do_all():
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
-  SAVE_IMAGES = True
-  SAVE_ROOT = "./output/rendered_2"
+  SAVE_IMAGES = False
+  SAVE_ROOT = "./output/rendered"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
 
@@ -309,10 +308,9 @@ def do_all():
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
   load_state_dict(clip_enc, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
   tokenizer = Tokenizer.ClipTokenizer()
-  # inception = FidInceptionV3().load_from_pretrained()
-  # for w in get_state_dict(inception).values():
-  #   w.replace(w.cast(dtypes.float16)).realize()
-  inception = load_inception_model(GPUS)
+  inception = FidInceptionV3().load_from_pretrained()
+  for w in get_state_dict(inception).values():
+    w.replace(w.cast(dtypes.float16)).realize()
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -333,13 +331,9 @@ def do_all():
   def decode_step(z:Tensor) -> Tensor:
     return model.decode(z).realize()
 
-  @TinyJit
-  def evaluation_step(tokens:Tensor, images:Tensor, x:Tensor) -> Tuple[Tensor,Tensor]:
-    return clip_enc.get_clip_score(tokens, images).realize(), inception(x).realize()
-
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < 300: #len(captions):
+  while dataset_i < len(captions):
     timings = []
 
     # Generate Image
@@ -372,13 +366,10 @@ def do_all():
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
 
-      # x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      # incp_act = inception_step(inception, x_pil.realize())
+      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      incp_act = inception(x_pil.realize())
 
-      # all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
-
-      all_incp_act.append(get_incp_act(inception, pil_im, GPUS))
-
+      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
         all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
 
