@@ -134,6 +134,23 @@ def compute_clip():
 def inception_step(model:FidInceptionV3, x:Tensor) -> Tensor:
   return model(x).realize()
 
+def load_inception_model(gpus=None) -> FidInceptionV3:
+  inception = FidInceptionV3().load_from_pretrained()
+  for w in get_state_dict(inception).values():
+    w2 = w.cast(dtypes.float16)
+    if gpus is not None:
+      w2 = w2.shard(gpus, axis=None)
+    w.replace(w2).realize()
+  return inception
+
+def get_inception_scores(model:FidInceptionV3, pil_ims:List[Image.Image], gpus=None):
+  images = [Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_ims]
+  x = Tensor.cat(*images, dim=0)
+  if gpus:
+    x = x.shard(gpus, axis=0)
+  incp_act = inception_step(model, x.realize())
+  return incp_act.squeeze(3).squeeze(2).to(Device.DEFAULT).realize()
+
 def compute_fid():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 50
@@ -141,9 +158,7 @@ def compute_fid():
   TEST_SIZE = 600 # 30_000
   Tensor.no_grad = True
 
-  inception = FidInceptionV3().load_from_pretrained()
-  for w in get_state_dict(inception).values():
-    w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
+  inception = load_inception_model(GPUS)
   
   wall_time_start = time.time()
   all_incp_act = []
@@ -151,17 +166,10 @@ def compute_fid():
   dataset_i = 0
   assert TEST_SIZE % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide TEST_SIZE ({TEST_SIZE}) for now"
   while dataset_i < TEST_SIZE:
-    images = []
-    for image_i in trange(GLOBAL_BS):
-      im = Image.open(f"output/rendered/gen_{dataset_i+image_i:05d}.png")
-      images.append(Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0))
+    pil_ims = [Image.open(f"output/rendered/gen_{dataset_i+image_i:05d}.png") for image_i in trange(GLOBAL_BS)]
+    all_incp_act.append(get_inception_scores(inception, pil_ims, GPUS))
 
-    x = Tensor.cat(*images, dim=0).shard(GPUS, axis=0)
-
-    incp_act = inception_step(inception, x.realize())
-    all_incp_act.append(incp_act.squeeze(3).squeeze(2).to(Device.DEFAULT).realize())
-
-    if len(all_incp_act) > 4:
+    if len(all_incp_act) > 20:
       all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
 
     dataset_i += GLOBAL_BS
@@ -387,4 +395,4 @@ def do_all():
 
 
 if __name__ == "__main__":
-  do_all()
+  compute_fid()
