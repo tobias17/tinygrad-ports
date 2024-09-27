@@ -290,8 +290,8 @@ def do_all():
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
-  SAVE_IMAGES = False
-  SAVE_ROOT = "./output/rendered"
+  SAVE_IMAGES = True
+  SAVE_ROOT = "./output/rendered_2"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
 
@@ -306,9 +306,10 @@ def do_all():
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
   load_state_dict(clip_enc, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
   tokenizer = Tokenizer.ClipTokenizer()
-  inception = FidInceptionV3().load_from_pretrained()
-  for w in get_state_dict(inception).values():
-    w.replace(w.cast(dtypes.float16)).realize()
+  # inception = FidInceptionV3().load_from_pretrained()
+  # for w in get_state_dict(inception).values():
+  #   w.replace(w.cast(dtypes.float16)).realize()
+  inception = load_inception_model(None)
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -335,7 +336,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < 500: #len(captions):
+  while dataset_i < 600: #len(captions):
     timings = []
 
     # Generate Image
@@ -368,10 +369,13 @@ def do_all():
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
 
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      incp_act = inception_step(inception, x_pil.realize())
+      # x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      # incp_act = inception_step(inception, x_pil.realize())
 
-      all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
+      # all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
+
+      all_incp_act.append(get_inception_scores(inception, pil_im, None))
+
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
         all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
 
@@ -395,4 +399,4 @@ def do_all():
 
 
 if __name__ == "__main__":
-  compute_fid()
+  do_all()
