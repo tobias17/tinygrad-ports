@@ -143,7 +143,7 @@ def load_inception_model(gpus=None) -> FidInceptionV3:
     w.replace(w2).realize()
   return inception
 
-def get_inception_scores(model:FidInceptionV3, pil_ims:List[Image.Image], gpus=None):
+def get_incp_act(model:FidInceptionV3, pil_ims:List[Image.Image], gpus=None):
   images = [Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_ims]
   x = Tensor.cat(*images, dim=0)
   if gpus:
@@ -155,7 +155,7 @@ def compute_fid():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 50
   GLOBAL_BS = DEVICE_BS * len(GPUS)
-  TEST_SIZE = 600 # 30_000
+  TEST_SIZE = 300 # 30_000
   Tensor.no_grad = True
 
   inception = load_inception_model(GPUS)
@@ -166,8 +166,8 @@ def compute_fid():
   dataset_i = 0
   assert TEST_SIZE % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide TEST_SIZE ({TEST_SIZE}) for now"
   while dataset_i < TEST_SIZE:
-    pil_ims = [Image.open(f"output/rendered/gen_{dataset_i+image_i:05d}.png") for image_i in trange(GLOBAL_BS)]
-    all_incp_act.append(get_inception_scores(inception, pil_ims, GPUS))
+    pil_ims = [Image.open(f"output/rendered_2/gen_{dataset_i+image_i:05d}.png") for image_i in trange(GLOBAL_BS)]
+    all_incp_act.append(get_incp_act(inception, pil_ims, GPUS))
 
     if len(all_incp_act) > 20:
       all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
@@ -286,7 +286,7 @@ def do_all():
   Tensor.no_grad = True
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  DEVICE_BS = 3
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   MAX_INCP_STORE_SIZE = 20
@@ -309,7 +309,7 @@ def do_all():
   # inception = FidInceptionV3().load_from_pretrained()
   # for w in get_state_dict(inception).values():
   #   w.replace(w.cast(dtypes.float16)).realize()
-  inception = load_inception_model(None)
+  inception = load_inception_model(GPUS)
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -336,7 +336,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < 600: #len(captions):
+  while dataset_i < 300: #len(captions):
     timings = []
 
     # Generate Image
@@ -374,7 +374,7 @@ def do_all():
 
       # all_incp_act.append(incp_act.squeeze(3).squeeze(2).realize())
 
-      all_incp_act.append(get_inception_scores(inception, pil_im, None))
+      all_incp_act.append(get_incp_act(inception, pil_im, GPUS))
 
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
         all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
@@ -399,4 +399,18 @@ def do_all():
 
 
 if __name__ == "__main__":
-  do_all()
+  func_map = {
+    "gen":  gen_images,
+    "fid":  compute_fid,
+    "clip": compute_clip,
+    "all":  do_all,
+  }
+
+  import argparse
+  parser = argparse.ArgumentParser()
+  parser.add_argument('func', default="all", choices=list(func_map.keys()))
+  args = parser.parse_args()
+
+  func = func_map.get(args.func, None)
+  assert func is not None
+  func()
