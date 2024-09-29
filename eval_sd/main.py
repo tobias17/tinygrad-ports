@@ -1,7 +1,7 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit, GlobalCounters # type: ignore
 from tinygrad.multi import MultiLazyBuffer
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
-from tinygrad.helpers import trange
+from tinygrad.helpers import trange, fetch
 from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims, run # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
@@ -191,46 +191,46 @@ def compute_fid():
 
 
 
-##################################################################
-# TODO: upstream
-FidInceptionV3.m1 = None
-FidInceptionV3.s1 = None
-def compute_score(self:FidInceptionV3, inception_activations:Tensor) -> float:
-  if self.m1 is None or self.s1 is None:
-    with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
-      self.m1, self.s1 = f['mu'][:], f['sigma'][:]
-    assert self.m1 is not None and self.s1 is not None
+# ##################################################################
+# # TODO: upstream
+# FidInceptionV3.m1 = None
+# FidInceptionV3.s1 = None
+# def compute_score(self:FidInceptionV3, inception_activations:Tensor) -> float:
+#   if self.m1 is None or self.s1 is None:
+#     with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
+#       self.m1, self.s1 = f['mu'][:], f['sigma'][:]
+#     assert self.m1 is not None and self.s1 is not None
   
-  m2 = inception_activations.mean(axis=0).numpy()
-  s2 = np.cov(inception_activations.numpy(), rowvar=False) # FIXME: need to figure out how to do in pure tinygrad
+#   m2 = inception_activations.mean(axis=0).numpy()
+#   s2 = np.cov(inception_activations.numpy(), rowvar=False) # FIXME: need to figure out how to do in pure tinygrad
 
-  return calculate_frechet_distance(self.m1, self.s1, m2, s2)
-FidInceptionV3.compute_score = compute_score
-#
-def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
-  mu1 = np.atleast_1d(mu1)
-  mu2 = np.atleast_1d(mu2)
-  sigma1 = np.atleast_2d(sigma1)
-  sigma2 = np.atleast_2d(sigma2)
-  assert mu1.shape == mu2.shape and sigma1.shape == sigma2.shape
+#   return calculate_frechet_distance(self.m1, self.s1, m2, s2)
+# FidInceptionV3.compute_score = compute_score
+# #
+# def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
+#   mu1 = np.atleast_1d(mu1)
+#   mu2 = np.atleast_1d(mu2)
+#   sigma1 = np.atleast_2d(sigma1)
+#   sigma2 = np.atleast_2d(sigma2)
+#   assert mu1.shape == mu2.shape and sigma1.shape == sigma2.shape
 
-  diff = mu1 - mu2
-  covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-  if not np.isfinite(covmean).all():
-    offset = np.eye(sigma1.shape[0]) * eps
-    covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
+#   diff = mu1 - mu2
+#   covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+#   if not np.isfinite(covmean).all():
+#     offset = np.eye(sigma1.shape[0]) * eps
+#     covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
 
-  if np.iscomplexobj(covmean):
-    if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-      m = np.max(np.abs(covmean.imag))
-      raise ValueError(f"Imaginary component {m}")
-    covmean = covmean.real
+#   if np.iscomplexobj(covmean):
+#     if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+#       m = np.max(np.abs(covmean.imag))
+#       raise ValueError(f"Imaginary component {m}")
+#     covmean = covmean.real
   
-  tr_covmean = np.trace(covmean)
+#   tr_covmean = np.trace(covmean)
 
-  return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
-#
-##################################################################
+#   return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
+# #
+# ##################################################################
 
 
 
@@ -288,10 +288,10 @@ def do_all():
   Tensor.no_grad = True
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 3
+  DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
-  MAX_INCP_STORE_SIZE = 20
+  MAX_INCP_STORE_SIZE = 4
   SAVE_IMAGES = False
   SAVE_ROOT = "./output/rendered"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
@@ -299,14 +299,16 @@ def do_all():
 
   # Load generation model
   model = SDXL(configs["SDXL_Base"])
-  load_state_dict(model, safe_load("/home/tiny/tinygrad/weights/sd_xl_base_1.0.safetensors"), strict=False)
+  weights_path = fetch("https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors", "sd_xl_base_1.0.safetensors")
+  load_state_dict(model, safe_load(weights_path), strict=False)
   for k,w in get_state_dict(model).items():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   # Load evaluation model
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
-  load_state_dict(clip_enc, torch_load("/home/tiny/weights_cache/tinygrad/downloads/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"), strict=False)
+  weights_path = fetch("https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin", "CLIP-ViT-H-14-laion2B-s32B-b79K.bin")
+  load_state_dict(clip_enc, torch_load(weights_path), strict=False)
   tokenizer = Tokenizer.ClipTokenizer()
   inception = FidInceptionV3().load_from_pretrained()
   for w in get_state_dict(inception).values():
@@ -316,7 +318,7 @@ def do_all():
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
 
   # Load dataset
-  df = pd.read_csv("/home/tiny/tinygrad/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
+  df = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
   captions = df["caption"].array
 
   wall_time_start = time.time()
@@ -333,7 +335,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < len(captions):
+  while dataset_i < 300: #len(captions):
     timings = []
 
     # Generate Image
@@ -386,7 +388,7 @@ def do_all():
 
   # Compute Final FID Score
   final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
-  fid_score = inception.compute_score(final_incp_acts)
+  fid_score = inception.compute_score(final_incp_acts, "/raid/datasets/coco2014/val2014_30k_stats.npz")
   print(f"fid_score:  {fid_score}")
 
   print("")
