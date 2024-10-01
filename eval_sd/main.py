@@ -1,15 +1,13 @@
-from tinygrad import Tensor, dtypes, Device, TinyJit, GlobalCounters # type: ignore
-from tinygrad.multi import MultiLazyBuffer
+from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
 from tinygrad.helpers import trange, fetch
-from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims, run # type: ignore
+from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
 
-from typing import Tuple, List, Dict
+from typing import List, Dict
 import pandas as pd # type: ignore
 import numpy as np
-from scipy import linalg # type: ignore
 from PIL import Image
 from threading import Thread
 import time, os
@@ -189,52 +187,6 @@ def compute_fid():
 
 
 
-
-
-# ##################################################################
-# # TODO: upstream
-# FidInceptionV3.m1 = None
-# FidInceptionV3.s1 = None
-# def compute_score(self:FidInceptionV3, inception_activations:Tensor) -> float:
-#   if self.m1 is None or self.s1 is None:
-#     with np.load("/home/tiny/tinygrad/datasets/coco2014/val2014_30k_stats.npz") as f:
-#       self.m1, self.s1 = f['mu'][:], f['sigma'][:]
-#     assert self.m1 is not None and self.s1 is not None
-  
-#   m2 = inception_activations.mean(axis=0).numpy()
-#   s2 = np.cov(inception_activations.numpy(), rowvar=False) # FIXME: need to figure out how to do in pure tinygrad
-
-#   return calculate_frechet_distance(self.m1, self.s1, m2, s2)
-# FidInceptionV3.compute_score = compute_score
-# #
-# def calculate_frechet_distance(mu1:np.ndarray, sigma1:np.ndarray, mu2:np.ndarray, sigma2:np.ndarray, eps:float=1e-6) -> float:
-#   mu1 = np.atleast_1d(mu1)
-#   mu2 = np.atleast_1d(mu2)
-#   sigma1 = np.atleast_2d(sigma1)
-#   sigma2 = np.atleast_2d(sigma2)
-#   assert mu1.shape == mu2.shape and sigma1.shape == sigma2.shape
-
-#   diff = mu1 - mu2
-#   covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-#   if not np.isfinite(covmean).all():
-#     offset = np.eye(sigma1.shape[0]) * eps
-#     covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
-
-#   if np.iscomplexobj(covmean):
-#     if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-#       m = np.max(np.abs(covmean.imag))
-#       raise ValueError(f"Imaginary component {m}")
-#     covmean = covmean.real
-  
-#   tr_covmean = np.trace(covmean)
-
-#   return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2*tr_covmean
-# #
-# ##################################################################
-
-
-
-
 ##################################################################
 # TODO: upstream
 @TinyJit
@@ -335,7 +287,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
-  while dataset_i < 300: #len(captions):
+  while dataset_i < len(captions):
     timings = []
 
     # Generate Image
