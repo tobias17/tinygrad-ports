@@ -5,7 +5,7 @@ from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims # t
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
 
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import pandas as pd # type: ignore
 import numpy as np
 from PIL import Image
@@ -190,11 +190,10 @@ def compute_fid():
 ##################################################################
 # TODO: upstream
 @TinyJit
-def run2(model, x, tms, ctx, y):
-  return (model(x, tms, ctx, y)).realize()
+def run2(model, decoder, x, tms, ctx, y, dec_in) -> Tuple[Tensor,Tensor]:
+  return (model(x, tms, ctx, y)).realize(), decoder(dec_in).realize()
 #
-def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
-
+def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict, dec_in:Tensor) -> Tuple[Tensor,Tensor]:
   def sigma_to_idx(s:Tensor) -> Tensor:
     dists = s - self.sigmas.unsqueeze(1)
     return dists.abs().argmin(axis=0).view(*s.shape)
@@ -210,14 +209,29 @@ def denoise(self:SDXL, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
   def prep(*tensors:Tensor):
     return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
-  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"])
-  return (run2(self.model.diffusion_model, *args)*c_out + x).realize()
+  args = prep(x*c_in, tms, cond["crossattn"], cond["vector"], dec_in)
+  dif_out, dec_out = run2(self.model.diffusion_model, self.decode, *args)
+  return (dif_out*c_out + x).realize(), dec_out.realize()
 SDXL.denoise = denoise
 #
 class SplitVanillaCFG(Guider):
+  in_queue:  List[Tensor] = []
+  out_queue: List[Tensor] = []
+  size: Tuple[int]
+
+  @staticmethod
+  def pop() -> Tuple[Tensor,bool]:
+    if len(SplitVanillaCFG.in_queue) == 0:
+      return Tensor.rand(SplitVanillaCFG.size).contiguous().realize(), False
+    return SplitVanillaCFG.in_queue.pop(0).contiguous().realize(), True
+
   def __call__(self, denoiser, x:Tensor, s:Tensor, c:Dict, uc:Dict) -> Tensor:
-    x_u = denoiser(x, s, uc)
-    x_c = denoiser(x, s, c)
+    dec_in_u, valid_u = SplitVanillaCFG.pop()
+    dec_in_c, valid_c = SplitVanillaCFG.pop()
+    x_u, dec_out_u = denoiser(x, s, uc, dec_in_u)
+    x_c, dec_out_c = denoiser(x, s, c,  dec_in_c)
+    if valid_u: SplitVanillaCFG.out_queue.append(dec_out_u)
+    if valid_c: SplitVanillaCFG.out_queue.append(dec_out_c)
     x_pred = x_u + self.scale*(x_c - x_u)
     return x_pred
 #
@@ -240,8 +254,10 @@ def do_all():
   Tensor.no_grad = True
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  DEVICE_BS = 12
   GLOBAL_BS = DEVICE_BS * len(GPUS)
+  DECODE_BS = 2
+  assert GLOBAL_BS % DECODE_BS == 0, f"Global Batch Size ({GLOBAL_BS}) must be divisible by Decode Batch Size ({DECODE_BS})"
 
   MAX_INCP_STORE_SIZE = 4
   SAVE_IMAGES = False
@@ -254,7 +270,7 @@ def do_all():
   weights_path = fetch("https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors", "sd_xl_base_1.0.safetensors")
   load_state_dict(model, safe_load(weights_path), strict=False)
   for k,w in get_state_dict(model).items():
-    if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
+    if k.startswith("model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   # Load evaluation model
@@ -268,6 +284,7 @@ def do_all():
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
+  SplitVanillaCFG.size = (DECODE_BS, 4, LATENT_SIZE, LATENT_SIZE)
 
   # Load dataset
   df = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)
@@ -280,10 +297,6 @@ def do_all():
   def async_save(images:List[Image.Image], global_i:int):
     for image_i, im in enumerate(images):
       im.save(f"{SAVE_ROOT}/gen_{global_i+image_i:05d}.png")
-
-  @TinyJit
-  def decode_step(z:Tensor) -> Tensor:
-    return model.decode(z).realize()
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
@@ -299,33 +312,41 @@ def do_all():
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
       z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
 
-    # Decode Images
-    with Timing("dec", timings):
-      x = decode_step(z.realize())
-      x = (x + 1.0) / 2.0
-      x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
-      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
-      pil_im = [Image.fromarray(ten_im[image_i]) for image_i in range(GLOBAL_BS)]
+      z = z.to(Device.DEFAULT)
+      assert len(SplitVanillaCFG.in_queue) == 0, "got SplitVanillaCFG.in_queue overflow, step size too large"
+      SplitVanillaCFG.in_queue.extend(z.chunk(GLOBAL_BS // DECODE_BS, dim=0))
 
-    # Save Images
-    if SAVE_IMAGES:
-      Thread(target=async_save, args=(pil_im,dataset_i)).start()
+    if len(SplitVanillaCFG.out_queue) > 0:
+      # Decode Images
+      with Timing("dec", timings):
+        x = Tensor.cat(*SplitVanillaCFG.out_queue)
+        x = (x + 1.0) / 2.0
+        x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
+        ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
+        pil_im = [Image.fromarray(ten_im[image_i]) for image_i in range(GLOBAL_BS)]
+        SplitVanillaCFG.out_queue = []
 
-    # Evaluate CLIP Score and Inception Activations
-    with Timing("eval", timings):
-      images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
-      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
-      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+      # Save Images
+      if SAVE_IMAGES:
+        Thread(target=async_save, args=(pil_im,dataset_i)).start()
 
-      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
-      all_clip_scores += clip_scores_np.tolist()
+      # Evaluate CLIP Score and Inception Activations
+      with Timing("eval", timings):
+        images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
+        tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
+        clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      incp_act = inception(x_pil.realize())
+        clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
+        all_clip_scores += clip_scores_np.tolist()
 
-      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
-      if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
-        all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
+        x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+        incp_act = inception(x_pil.realize())
+
+        all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
+        if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
+          all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
+    else:
+      clip_scores_np = np.zeros(1,)
 
     # Print Progress
     dataset_i += GLOBAL_BS
