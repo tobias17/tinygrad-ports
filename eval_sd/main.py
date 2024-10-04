@@ -243,9 +243,9 @@ def do_all():
   DEVICE_BS = 4
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
-  MAX_INCP_STORE_SIZE = 4
+  MAX_INCP_STORE_SIZE = 10
   SAVE_IMAGES = False
-  SAVE_ROOT = "./output/rendered"
+  SAVE_ROOT = "./output/rendered_2"
   if SAVE_IMAGES and not os.path.exists(SAVE_ROOT):
     os.makedirs(SAVE_ROOT)
 
@@ -283,7 +283,7 @@ def do_all():
 
   @TinyJit
   def decode_step(z:Tensor) -> Tensor:
-    return model.decode(z).realize()
+    return model.decode(z).to(Device.DEFAULT).realize()
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
@@ -301,11 +301,13 @@ def do_all():
 
     # Decode Images
     with Timing("dec", timings):
-      x = decode_step(z.realize())
-      x = (x + 1.0) / 2.0
-      x = x.reshape(GLOBAL_BS,3,IMG_SIZE,IMG_SIZE).realize()
-      ten_im = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
-      pil_im = [Image.fromarray(ten_im[image_i]) for image_i in range(GLOBAL_BS)]
+      pil_im = []
+      for b in z.to(Device.DEFAULT).chunk(DEVICE_BS):
+        x = decode_step(b.shard(GPUS, axis=0).realize())
+        x = (x + 1.0) / 2.0
+        x = x.reshape(len(GPUS),3,IMG_SIZE,IMG_SIZE).realize()
+        ten_im  = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
+        pil_im += [Image.fromarray(ten_im[image_i]) for image_i in range(len(GPUS))]
 
     # Save Images
     if SAVE_IMAGES:
