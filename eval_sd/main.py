@@ -240,7 +240,7 @@ def do_all():
   Tensor.no_grad = True
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
-  DEVICE_BS = 2
+  DEVICE_BS = 8
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   CLIP_DEV = GPUS[1 % len(GPUS)]
