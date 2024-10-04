@@ -239,9 +239,14 @@ def do_all():
   Tensor.manual_seed(42)
   Tensor.no_grad = True
 
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(1,6)]
-  DEVICE_BS = 4
+  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
+  DEVICE_BS = 2
   GLOBAL_BS = DEVICE_BS * len(GPUS)
+
+  CLIP_DEV = GPUS[1 % len(GPUS)]
+  INCP_DEV = GPUS[2 % len(GPUS)]
+  GATH_DEV = GPUS[3 % len(GPUS)]
+  DECD_DEV = GPUS[4 % len(GPUS)]
 
   MAX_INCP_STORE_SIZE = 10
   SAVE_IMAGES = False
@@ -257,14 +262,18 @@ def do_all():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
-  # Load evaluation model
+  # Load CLIP
+  tokenizer = Tokenizer.ClipTokenizer()
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
   weights_path = fetch("https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin", "CLIP-ViT-H-14-laion2B-s32B-b79K.bin")
   load_state_dict(clip_enc, torch_load(weights_path), strict=False)
-  tokenizer = Tokenizer.ClipTokenizer()
+  for w in get_state_dict(clip_enc).values():
+    w.replace(w.cast(dtypes.float16).to(CLIP_DEV)).realize()
+
+  # Load Inception
   inception = FidInceptionV3().load_from_pretrained()
   for w in get_state_dict(inception).values():
-    w.replace(w.cast(dtypes.float16)).realize()
+    w.replace(w.cast(dtypes.float16).to(INCP_DEV))
 
   # Create sampler
   sampler = DPMPP2MSampler(GUIDANCE_SCALE, guider_cls=SplitVanillaCFG)
@@ -283,7 +292,7 @@ def do_all():
 
   @TinyJit
   def decode_step(z:Tensor) -> Tensor:
-    return model.decode(z).to(Device.DEFAULT).realize()
+    return model.decode(z).to(DECD_DEV).realize()
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
@@ -302,7 +311,7 @@ def do_all():
     # Decode Images
     with Timing("dec", timings):
       pil_im = []
-      for b in z.to(Device.DEFAULT).chunk(DEVICE_BS):
+      for b in z.to(GATH_DEV).chunk(DEVICE_BS):
         x = decode_step(b.shard(GPUS, axis=0).realize())
         x = (x + 1.0) / 2.0
         x = x.reshape(len(GPUS),3,IMG_SIZE,IMG_SIZE).realize()
@@ -315,14 +324,14 @@ def do_all():
 
     # Evaluate CLIP Score and Inception Activations
     with Timing("eval", timings):
-      images = [clip_enc.prepare_image(im).unsqueeze(0) for im in pil_im]
-      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64).reshape(1,-1) for text in texts]
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_DEV).reshape(1,-1) for text in texts]
+      images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_DEV) for im in pil_im]
       clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
-      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS)).sum(axis=-1).numpy()
+      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_DEV)).sum(axis=-1).numpy()
       all_clip_scores += clip_scores_np.tolist()
 
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16, device=INCP_DEV).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
       incp_act = inception(x_pil.realize())
 
       all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
