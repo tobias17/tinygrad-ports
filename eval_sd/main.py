@@ -1,6 +1,6 @@
 from tinygrad import Tensor, dtypes, Device, TinyJit # type: ignore
 from tinygrad.nn.state import load_state_dict, safe_load, get_state_dict, torch_load
-from tinygrad.helpers import trange, fetch
+from tinygrad.helpers import trange, fetch, BEAM
 from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims # type: ignore
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
@@ -238,6 +238,8 @@ class Timing:
 def do_all():
   Tensor.manual_seed(42)
   Tensor.no_grad = True
+  BEAM_VALUE = BEAM.value
+  BEAM.value = 0
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 8
@@ -296,6 +298,7 @@ def do_all():
 
   dataset_i = 0
   assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
+  BEAM.value = BEAM_VALUE
   while dataset_i < len(captions):
     timings = []
 
