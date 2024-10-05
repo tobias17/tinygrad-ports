@@ -242,13 +242,14 @@ def do_all():
   BEAM.value = 0
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
-  DEVICE_BS = 6
+  DEVICE_BS = 7
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   CLIP_DEV = GPUS[1 % len(GPUS)]
   INCP_DEV = GPUS[2 % len(GPUS)]
   GATH_DEV = GPUS[3 % len(GPUS)]
   DECD_DEV = GPUS[4 % len(GPUS)]
+  STRE_DEV = GPUS[5 % len(GPUS)]
 
   MAX_INCP_STORE_SIZE = 10
   SAVE_IMAGES = False
@@ -340,9 +341,9 @@ def do_all():
       incp_act = inception(x_pil.realize())
       if padding > 0: incp_act = incp_act[:-padding]
 
-      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
+      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).to(STRE_DEV).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
-        all_incp_act = [Tensor.cat(*all_incp_act, dim=0)]
+        all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
 
     # Print Progress
     dataset_i += GLOBAL_BS
