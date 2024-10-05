@@ -242,7 +242,7 @@ def do_all():
   BEAM.value = 0
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
-  DEVICE_BS = 8
+  DEVICE_BS = 6
   GLOBAL_BS = DEVICE_BS * len(GPUS)
 
   CLIP_DEV = GPUS[1 % len(GPUS)]
@@ -297,14 +297,15 @@ def do_all():
     return model.decode(z).to(DECD_DEV).realize()
 
   dataset_i = 0
-  assert len(captions) % GLOBAL_BS == 0, f"GLOBAL_BS ({GLOBAL_BS}) needs to evenly divide len(captions) ({len(captions)}) for now"
   BEAM.value = BEAM_VALUE
   while dataset_i < len(captions):
     timings = []
+    padding = 0 if dataset_i+GLOBAL_BS <= len(captions) else (dataset_i+GLOBAL_BS) - len(captions)
 
     # Generate Image
     with Timing("gen", timings):
       texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
+      if padding > 0: texts += ["" for _ in range(padding)]
       c, uc = model.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
       for t in  c.values(): t.shard_(GPUS, axis=0)
       for t in uc.values(): t.shard_(GPUS, axis=0)
@@ -332,10 +333,12 @@ def do_all():
       clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_DEV)).sum(axis=-1).numpy()
+      if padding > 0: clip_scores_np = clip_scores_np[:-padding]
       all_clip_scores += clip_scores_np.tolist()
 
       x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16, device=INCP_DEV).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
       incp_act = inception(x_pil.realize())
+      if padding > 0: incp_act = incp_act[:-padding]
 
       all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
