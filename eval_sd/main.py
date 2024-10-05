@@ -298,7 +298,6 @@ def do_all():
     return model.decode(z).to(DECD_DEV).realize()
 
   dataset_i = 0
-  BEAM.value = BEAM_VALUE
   while dataset_i < len(captions):
     timings = []
     padding = 0 if dataset_i+GLOBAL_BS <= len(captions) else (dataset_i+GLOBAL_BS) - len(captions)
@@ -311,13 +310,18 @@ def do_all():
       for t in  c.values(): t.shard_(GPUS, axis=0)
       for t in uc.values(): t.shard_(GPUS, axis=0)
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
+      BEAM.value = BEAM_VALUE
       z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
+      BEAM.value = 0
 
     # Decode Images
     with Timing("dec", timings):
       pil_im = []
       for b in z.to(GATH_DEV).chunk(DEVICE_BS):
-        x = decode_step(b.shard(GPUS, axis=0).realize())
+        b_in = b.shard(GPUS, axis=0).realize()
+        BEAM.value = BEAM_VALUE
+        x = decode_step(b_in)
+        BEAM.value = 0
         x = (x + 1.0) / 2.0
         x = x.reshape(len(GPUS),3,IMG_SIZE,IMG_SIZE).realize()
         ten_im  = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
