@@ -5,7 +5,7 @@ from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims # t
 from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
 from extra.models.inception import FidInceptionV3 # type: ignore
 
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import pandas as pd # type: ignore
 import numpy as np
 from PIL import Image
@@ -235,11 +235,21 @@ class Timing:
   def __exit__(self, *_):
     self.collection.append(self.print_fnx(self.label, (time.time() - self.start_time)))
 
+class BeamContext:
+  value: int = BEAM.value
+
+  @staticmethod
+  def set()   -> None: BEAM.value = BeamContext.value
+  @staticmethod
+  def clear() -> None: BEAM.value = 0
+
+  def __enter__(self):    BeamContext.set()
+  def __exit__(self, *_): BeamContext.clear()
+
 def do_all():
   Tensor.manual_seed(42)
   Tensor.no_grad = True
-  BEAM_VALUE = BEAM.value
-  BEAM.value = 0
+  BeamContext.clear()
 
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(6)]
   DEVICE_BS = 7
@@ -248,8 +258,7 @@ def do_all():
   CLIP_DEV = GPUS[1 % len(GPUS)]
   INCP_DEV = GPUS[2 % len(GPUS)]
   GATH_DEV = GPUS[3 % len(GPUS)]
-  DECD_DEV = GPUS[4 % len(GPUS)]
-  STRE_DEV = GPUS[5 % len(GPUS)]
+  STOR_DEV = GPUS[4 % len(GPUS)]
 
   MAX_INCP_STORE_SIZE = 10
   SAVE_IMAGES = False
@@ -292,10 +301,19 @@ def do_all():
   def async_save(images:List[Image.Image], global_i:int):
     for image_i, im in enumerate(images):
       im.save(f"{SAVE_ROOT}/gen_{global_i+image_i:05d}.png")
+  
+  @TinyJit
+  def chunk_batches(z:Tensor) -> List[Tensor]:
+    return [b.shard(GPUS, axis=0).realize() for b in z.to(GATH_DEV).chunk(DEVICE_BS)]
 
   @TinyJit
-  def decode_step(z:Tensor) -> Tensor:
-    return model.decode(z).to(DECD_DEV).realize()
+  def decode_step(z:Tensor) -> Tuple[Tensor,Tensor]:
+    x = model.decode(z)
+    x = (x + 1.0) / 2.0
+    x = x.reshape(z.shape[0],3,IMG_SIZE,IMG_SIZE)
+    inc_x = x.to(INCP_DEV)
+    x = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
+    return x.realize(), inc_x.realize()
 
   dataset_i = 0
   while dataset_i < len(captions):
@@ -310,22 +328,18 @@ def do_all():
       for t in  c.values(): t.shard_(GPUS, axis=0)
       for t in uc.values(): t.shard_(GPUS, axis=0)
       randn = Tensor.randn(GLOBAL_BS, 4, LATENT_SIZE, LATENT_SIZE).shard(GPUS, axis=0)
-      BEAM.value = BEAM_VALUE
-      z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
-      BEAM.value = 0
+      with BeamContext():
+        z = sampler(model.denoise, randn, c, uc, NUM_STEPS).realize()
 
     # Decode Images
     with Timing("dec", timings):
-      pil_im = []
-      for b in z.to(GATH_DEV).chunk(DEVICE_BS):
-        b_in = b.shard(GPUS, axis=0).realize()
-        BEAM.value = BEAM_VALUE
-        x = decode_step(b_in)
-        BEAM.value = 0
-        x = (x + 1.0) / 2.0
-        x = x.reshape(len(GPUS),3,IMG_SIZE,IMG_SIZE).realize()
-        ten_im  = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8).numpy()
-        pil_im += [Image.fromarray(ten_im[image_i]) for image_i in range(len(GPUS))]
+      with BeamContext():
+        pil_im, xs = [], []
+        for b_in in chunk_batches(z.realize()):
+          b_im, b_x = decode_step(b_in)
+          xs.append(b_x)
+          b_np = b_im.numpy()
+          pil_im += [Image.fromarray(b_np[image_i]) for image_i in range(len(GPUS))]
 
     # Save Images
     if SAVE_IMAGES:
@@ -337,14 +351,13 @@ def do_all():
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_DEV).reshape(1,-1) for text in texts]
       images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_DEV) for im in pil_im]
 
-      # Prep Inception Input
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16, device=INCP_DEV).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      
-      # Run CLIP and Inception with BEAM
-      BEAM.value = BEAM_VALUE
-      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
-      incp_act = inception(x_pil.realize())
-      BEAM.value = 0
+      with BeamContext():
+        # Prep Inception Input
+        x_incp = Tensor.cat(*xs, dim=0)
+
+        # Run CLIP and Inception
+        clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+        incp_act = inception(x_incp.realize())
 
       # Accumulate CLIP
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_DEV)).sum(axis=-1).numpy()
@@ -353,7 +366,7 @@ def do_all():
       
       # Accumulate Inception
       if padding > 0: incp_act = incp_act[:-padding]
-      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).to(STRE_DEV).realize())
+      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).to(STOR_DEV).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
         all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
 
