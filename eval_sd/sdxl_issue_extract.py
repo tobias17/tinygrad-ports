@@ -220,7 +220,10 @@ def append_dims(x:Tensor, t:Tensor) -> Tensor:
 
 
 @TinyJit
-def run(model, x, tms, ctx, y, c_out, add):
+def run_yes(model, x, tms, ctx, y, c_out, add):
+  return (model(x, tms, ctx, y)*c_out + add).realize()
+
+def run_no(model, x, tms, ctx, y, c_out, add):
   return (model(x, tms, ctx, y)*c_out + add).realize()
 
 
@@ -254,7 +257,7 @@ class SDXL:
     return self.conditioner(batch_c), self.conditioner(batch_uc, force_zero_embeddings=["txt"])
 
   # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/denoiser.py#L42
-  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict) -> Tensor:
+  def denoise(self, x:Tensor, sigma:Tensor, cond:Dict, use_jit:bool) -> Tensor:
 
     def sigma_to_idx(s:Tensor) -> Tensor:
       dists = s - self.sigmas.unsqueeze(1)
@@ -271,6 +274,7 @@ class SDXL:
     def prep(*tensors:Tensor):
       return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
+    def run(*args): return run_yes(*args) if use_jit else run_no(*args)
     return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
 
   def decode(self, x:Tensor) -> Tensor:
@@ -298,10 +302,15 @@ class VanillaCFG(Guider):
 
 class SplitVanillaCFG(Guider):
   def __call__(self, denoiser, x:Tensor, s:Tensor, c:Dict, uc:Dict) -> Tensor:
-    x_u = denoiser(x, s, uc)
-    x_c = denoiser(x, s, c)
-    x_pred = x_u + self.scale*(x_c - x_u)
-    return x_pred
+    x_pred = {}
+    for use_jit in [True, False]:
+      x_u = denoiser(x, s, uc, use_jit)
+      x_c = denoiser(x, s, c,  use_jit)
+      x_pred[use_jit] = x_u + self.scale*(x_c - x_u)
+    
+    print(f"delta: {Tensor.abs(x_pred[True] - x_pred[False]).mean().numpy()}")
+
+    return x_pred[False]
 
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/sampling.py#L21
@@ -338,7 +347,7 @@ class DPMPP2MSampler:
     num_sigmas = len(sigmas)
 
     old_denoised = None
-    for i in trange(num_sigmas - 1):
+    for i in trange(num_sigmas - 1, disable=True):
       with Timing("step in ", enabled=timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
         x, old_denoised = self.sampler_step(
           old_denoised=old_denoised,
@@ -362,8 +371,8 @@ if __name__ == "__main__":
   parser.add_argument('--steps',    type=int,   default=10, help="The number of diffusion steps")
   parser.add_argument('--prompt',   type=str,   default=default_prompt, help="Description of image to generate")
   parser.add_argument('--out',      type=str,   default=Path(tempfile.gettempdir()) / "rendered.png", help="Output filename")
-  parser.add_argument('--seed',     type=int,   help="Set the random latent seed")
-  parser.add_argument('--guidance', type=float, default=6.0, help="Prompt strength")
+  parser.add_argument('--seed',     type=int,   default=0,    help="Set the random latent seed")
+  parser.add_argument('--guidance', type=float, default=6.0,  help="Prompt strength")
   parser.add_argument('--width',    type=int,   default=1024, help="The output image width")
   parser.add_argument('--height',   type=int,   default=1024, help="The output image height")
   parser.add_argument('--weights',  type=str,   help="Custom path to weights")
@@ -400,26 +409,3 @@ if __name__ == "__main__":
 
   sampler = DPMPP2MSampler(args.guidance, guider_cls=SplitVanillaCFG)
   z = sampler(model.denoise, randn, c, uc, args.steps, timing=args.timing)
-  print("created samples")
-  x = model.decode(z).realize()
-  print("decoded samples")
-
-  # make image correct size and scale
-  x = (x + 1.0) / 2.0
-  x = x.reshape(3,args.height,args.width).permute(1,2,0).clip(0,1).mul(255).cast(dtypes.uint8)
-  print(x.shape)
-
-  im = Image.fromarray(x.numpy())
-  print(f"saving {args.out}")
-  im.save(args.out)
-
-  if not args.noshow:
-    im.show()
-
-  # validation!
-  if args.prompt == default_prompt and args.steps == 10 and args.seed == 0 and args.guidance == 6.0 and args.width == args.height == 1024 \
-    and not args.weights:
-    ref_image = Tensor(np.array(Image.open("/home/tiny/tinygrad/examples/sdxl_seed0.png")))
-    distance = (((x.cast(dtypes.float) - ref_image.cast(dtypes.float)) / ref_image.max())**2).mean().item()
-    assert distance < 4e-3, colored(f"validation failed with {distance=}", "red")
-    print(colored(f"output validated with {distance=}", "green"))
