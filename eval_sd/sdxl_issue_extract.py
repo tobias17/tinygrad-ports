@@ -101,10 +101,6 @@ class UNetModel:
       assert y.shape[0] == x.shape[0]
       emb = emb + y.sequential(self.label_emb[0])
 
-    emb = emb.cast(dtypes.float16)
-    ctx = ctx.cast(dtypes.float16)
-    x   = x  .cast(dtypes.float16)
-
     def run(x:Tensor, bb) -> Tensor:
       if isinstance(bb, ResBlock): x = bb(x, emb)
       elif isinstance(bb, SpatialTransformer): x = bb(x, ctx)
@@ -149,8 +145,8 @@ if __name__ == "__main__":
 
   for i in range(5):
     x_pred = {}
-    args1 = [Tensor.randn(shp, dtype=dtypes.float16).realize() for shp in shps]
-    args2 = [Tensor.randn(shp, dtype=dtypes.float16).realize() for shp in shps]
+    args1 = [Tensor.randn(shp, dtype=dtypes.float32).realize() for shp in shps]
+    args2 = [Tensor.randn(shp, dtype=dtypes.float32).realize() for shp in shps]
     for use_jit in [True, False]:
       def run(*args): return run_yes(*args) if use_jit else run_no(*args)
       x_u = run(model, *args1)
