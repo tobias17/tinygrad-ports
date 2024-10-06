@@ -12,18 +12,18 @@ if __name__ == "__main__":
   Tensor.no_grad = True
   Tensor.manual_seed(0)
 
-  model = UNetModel(adm_in_ch=2816, in_ch=4, out_ch=4, model_ch=320, attention_resolutions=[4, 2], num_res_blocks=2, channel_mult=[1, 2, 4], d_head=64, transformer_depth=[1, 2, 10], ctx_dim=2048, use_linear=True)
+  model = UNetModel(adm_in_ch=36, in_ch=4, out_ch=4, model_ch=48, attention_resolutions=[4, 2], num_res_blocks=2, channel_mult=[1, 2, 4], d_head=8, transformer_depth=[1, 2, 10], ctx_dim=64, use_linear=True)
 
   shps = (
     (1, 4, 32, 32),
     (1,),
-    (1, 77, 2048),
-    (1, 2816),
+    (1, 22, 64),
+    (1, 36),
     (1, 1, 1, 1),
     (1, 4, 32, 32),
   )
 
-  for i in range(10):
+  for i in range(5):
     x_pred = {}
     args1 = [Tensor.randn(shp, dtype=dtypes.float16).realize() for shp in shps]
     args2 = [Tensor.randn(shp, dtype=dtypes.float16).realize() for shp in shps]
