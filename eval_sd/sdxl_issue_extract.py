@@ -229,6 +229,8 @@ def run_no(model, x, tms, ctx, y, c_out, add):
 
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/models/diffusion.py#L19
 class SDXL:
+  warmed_up: bool = False
+
   def __init__(self, config:Dict):
     self.conditioner = Conditioner(**config["conditioner"])
     self.first_stage_model = FirstStageModel(**config["first_stage_model"])
@@ -275,7 +277,12 @@ class SDXL:
       return tuple(t.cast(dtypes.float16).realize() for t in tensors)
 
     def run(*args): return run_yes(*args) if use_jit else run_no(*args)
-    return run(self.model.diffusion_model, *prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x))
+    args = prep(x*c_in, c_noise, cond["crossattn"], cond["vector"], c_out, x)
+    if use_jit and not self.warmed_up:
+      for _ in trange(4):
+        run(self.model.diffusion_model, *[Tensor.rand_like(a, dtype=a.dtype, device=a.device).realize() for a in args])
+      self.warmed_up = True
+    return run(self.model.diffusion_model, *args)
 
   def decode(self, x:Tensor) -> Tensor:
     return self.first_stage_model.decode(1.0 / 0.13025 * x)
@@ -385,10 +392,6 @@ if __name__ == "__main__":
     Tensor.manual_seed(args.seed)
 
   model = SDXL(configs["SDXL_Base"])
-
-  default_weight_url = 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors'
-  weights = args.weights if args.weights else fetch(default_weight_url, 'sd_xl_base_1.0.safetensors')
-  load_state_dict(model, safe_load(weights), strict=False)
 
   N = 1
   C = 4
