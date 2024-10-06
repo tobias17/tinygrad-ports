@@ -1,10 +1,10 @@
-from tinygrad import Tensor, TinyJit, dtypes
+from tinygrad import Tensor, TinyJit
 
 @TinyJit
-def run_yes(x, add):
+def run_yes(x, add) -> Tensor:
   return (x + add).realize()
 
-def run_not(x, add):
+def run_not(x, add) -> Tensor:
   return (x + add).realize()
 
 if __name__ == "__main__":
@@ -22,8 +22,7 @@ if __name__ == "__main__":
     y_out_1, y_out_2 = run_yes(*args1), run_yes(*args2)
     n_out_1, n_out_2 = run_not(*args1), run_not(*args2)
 
-    def comp(o1, o2) -> Tensor:
-      return o1 + 8.0*(o2 - o1)
+    y_comp = (y_out_1 - y_out_2).realize()
+    n_comp = (n_out_1 - n_out_2).realize()
 
-    delta = comp(y_out_1, y_out_2) - comp(n_out_1, n_out_2)
-    print(f"ITER {i:02d}: delta={delta.abs().mean().numpy():.4f}")
+    print(f"ITER {i:02d}: delta={Tensor.abs(y_comp - n_comp).mean().numpy():.4f}")
