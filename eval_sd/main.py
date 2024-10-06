@@ -333,18 +333,26 @@ def do_all():
 
     # Evaluate CLIP Score and Inception Activations
     with Timing("eval", timings):
+      # Prep CLIP Input
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_DEV).reshape(1,-1) for text in texts]
       images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_DEV) for im in pil_im]
-      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
 
+      # Prep Inception Input
+      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16, device=INCP_DEV).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
+      
+      # Run CLIP and Inception with BEAM
+      BEAM.value = BEAM_VALUE
+      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+      incp_act = inception(x_pil.realize())
+      BEAM.value = 0
+
+      # Accumulate CLIP
       clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_DEV)).sum(axis=-1).numpy()
       if padding > 0: clip_scores_np = clip_scores_np[:-padding]
       all_clip_scores += clip_scores_np.tolist()
-
-      x_pil = Tensor.cat(*[Tensor(np.asarray(im), dtype=dtypes.float16, device=INCP_DEV).div(255.0).permute(2,0,1).unsqueeze(0) for im in pil_im], dim=0)
-      incp_act = inception(x_pil.realize())
+      
+      # Accumulate Inception
       if padding > 0: incp_act = incp_act[:-padding]
-
       all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).to(STRE_DEV).realize())
       if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
         all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
