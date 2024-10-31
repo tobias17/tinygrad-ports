@@ -13,19 +13,19 @@ def eval_sd():
   import pandas as pd # type: ignore
   from PIL import Image
   from tinygrad.helpers import fetch, Context, BEAM
-  from examples.sdxl import SDXL, DPMPP2MSampler, Guider, configs, append_dims, SplitVanillaCFG # type: ignore
+  from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG # type: ignore
   from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
   from extra.models.inception import FidInceptionV3 # type: ignore
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6))]
-  GEN_GPUS   = GPUS[:-1] if len(GPUS) > 1 else GPUS
-  EVAL_GPU   = GPUS[-1]
+  EVAL_GPU   = GPUS[0]
+  GEN_GPUS   = GPUS[1:] if len(GPUS) > 1 else GPUS
   CFG_SCALE  = getenv("CFG_SCALE", 8.0)
   IMG_SIZE   = getenv("IMG_SIZE",  1024)
   NUM_STEPS  = getenv("NUM_STEPS", 20)
   DEVICE_BS  = getenv("DEVICE_BS", 8)
   BEAM_VALUE = getenv("BEAM",      1)
   BEAM.value = 0
-  GLOBAL_BS  = DEVICE_BS * GEN_GPUS
+  GLOBAL_BS  = DEVICE_BS * len(GEN_GPUS)
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
@@ -35,7 +35,7 @@ def eval_sd():
   mdl = SDXL(configs["SDXL_Base"])
   load_state_dict(mdl, safe_load(fetch("https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors", "sd_xl_base_1.0.safetensors")), strict=False)
   for k,w in get_state_dict(mdl).items():
-    if k.startswith("model.") or k.startswith("first_stage_model.") or k.startswith("sigmas"):
+    if k.startswith("model.") or k.startswith("first_stage_model.") or k == "sigmas":
       w.replace(w.cast(dtypes.float16).shard(GEN_GPUS, axis=None)).realize()
   tokenizer = Tokenizer.ClipTokenizer()
   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
@@ -45,14 +45,15 @@ def eval_sd():
   inception = FidInceptionV3().load_from_pretrained()
   for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).to(EVAL_GPU)).realize()
 
-  # Loop Objects
-  sampler = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)["caption"].array
+  sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
+  captions = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)["caption"].array[:67]
+  all_clip_scores = []
+  all_incp_act    = []
 
   @TinyJit
   def chunk_batches(z:Tensor):
-    return [b.shard(GEN_GPUS, axis=0).realize() for b in z.to(EVAL_GPU).chunk(GEN_GPUS)]
-  @TinyJit
+    return [b.shard(GEN_GPUS, axis=0).realize() for b in z.to(EVAL_GPU).chunk(len(GEN_GPUS))]
+  @TinyJit 
   def decode_step(z:Tensor):
     x = mdl.decode(z)
     x = (x + 1.0) / 2.0
@@ -62,21 +63,22 @@ def eval_sd():
     return x.realize(), inc_x.realize()
   @TinyJit
   def clip_step(tokens, images):
-    return clip_enc(tokens, images).realize()
+    return clip_enc.get_clip_score(tokens, images).realize()
 
-  all_clip_scores = []
-  all_incp_act    = []
-
+  st = time.perf_counter()
   for dataset_i in range(0, len(captions), GLOBAL_BS):
     padding = 0 if (dataset_i+GLOBAL_BS <= len(captions)) else (dataset_i+GLOBAL_BS) - len(captions)
 
-    # Generate Images
+    # Prepare Inputs
     texts = captions[dataset_i:dataset_i+GLOBAL_BS].tolist()
     if padding > 0: texts += ["" for _ in range(padding)]
     c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
     for t in  c.values(): t.shard_(GEN_GPUS, axis=0)
     for t in uc.values(): t.shard_(GEN_GPUS, axis=0)
-    randn = Tensor.randn(GLOBAL_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
+    randn = Tensor.randn(GLOBAL_BS, 4, LAT_SIZE, LAT_SIZE).shard(GEN_GPUS, axis=0)
+    pt = time.perf_counter()
+
+    # Generate Images
     with Context(BEAM=BEAM_VALUE):
       z = sampler(mdl.denoise, randn, c, uc, NUM_STEPS).realize()
       pil_im, xs = [], []
@@ -84,14 +86,15 @@ def eval_sd():
         b_im, b_x = decode_step(b_in)
         xs.append(b_x)
         b_np = b_im.numpy()
-        pil_im += [Image.fromarray(b_np[image_i]) for image_i in range(len(GPUS))]
+        pil_im += [Image.fromarray(b_np[image_i]) for image_i in range(len(GEN_GPUS))]
+    gt = time.perf_counter()
     
     # Evaluate Images
     tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=EVAL_GPU).reshape(1,-1) for text in texts]
     images = [clip_enc.prepare_image(im).unsqueeze(0).to(EVAL_GPU) for im in pil_im]
     with Context(BEAM=BEAM_VALUE):
       x_incp = Tensor.cat(*xs, dim=0)
-      clip_scores = clip_step(clip_enc.get_clip_score, Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+      clip_scores = clip_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
       incp_act = inception(x_incp.realize())
     
     clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=EVAL_GPU)).sum(axis=-1).numpy()
@@ -102,10 +105,19 @@ def eval_sd():
     all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
     if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
       all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
+    et = time.perf_counter()
 
+    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, {(st-pt)*1000:.2f} ms prep, {(pt-gt)*1000:.2f} ms gen, {(gt-et)*1000:.2f} ms eval")
+    st = et
+
+  # Final Score Computation
   print("\n" + "="*80 + "\n")
   print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores)}")
   final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
   fid_score = inception.compute_score(final_incp_acts, "/raid/datasets/coco2014/val2014_30k_stats.npz")
   print(f"fid_score:  {fid_score}")
+  print(f"wall_time:  {time.perf_counter()-start/3600:.3f} hours")
   print("")
+
+if __name__ == "__main__":
+  eval_sd()
