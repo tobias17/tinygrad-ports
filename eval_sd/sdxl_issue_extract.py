@@ -13,7 +13,7 @@ if __name__ == "__main__":
   for i in range(5):
     a1, a2, a3, a4 = [Tensor.randn(32, 32) for _ in range(4)]
 
-    y_comp = run_yes(a1, a2) - run_yes(a3, a4)
-    n_comp = run_not(a1, a2) - run_not(a3, a4)
+    y_out = run_yes(a1, a2).realize() - run_yes(a3, a4).realize()
+    n_out = run_not(a1, a2).realize() - run_not(a3, a4).realize()
 
-    print(f"ITER {i:02d}: delta={Tensor.abs(y_comp - n_comp).mean().numpy():.4f}")
+    print(f"ITER {i:02d}: delta={Tensor.abs(y_out - n_out).mean().numpy():.4f}")
