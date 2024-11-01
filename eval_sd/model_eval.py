@@ -46,7 +46,7 @@ def eval_sd():
   for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).to(EVAL_GPU)).realize()
 
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)["caption"].array[:67]
+  captions = pd.read_csv("/raid/datasets/coco2014/val2014_30k.tsv", sep='\t', header=0)["caption"].array
   all_clip_scores = []
   all_incp_act    = []
 
@@ -88,7 +88,7 @@ def eval_sd():
         b_np = b_im.numpy()
         pil_im += [Image.fromarray(b_np[image_i]) for image_i in range(len(GEN_GPUS))]
     gt = time.perf_counter()
-    
+
     # Evaluate Images
     tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=EVAL_GPU).reshape(1,-1) for text in texts]
     images = [clip_enc.prepare_image(im).unsqueeze(0).to(EVAL_GPU) for im in pil_im]
@@ -96,7 +96,7 @@ def eval_sd():
       x_incp = Tensor.cat(*xs, dim=0)
       clip_scores = clip_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
       incp_act = inception(x_incp.realize())
-    
+
     clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=EVAL_GPU)).sum(axis=-1).numpy()
     if padding > 0: clip_scores_np = clip_scores_np[:-padding]
     all_clip_scores += clip_scores_np.tolist()
@@ -108,12 +108,12 @@ def eval_sd():
     et = time.perf_counter()
 
     curr_i = min(dataset_i+GLOBAL_BS, len(captions))
-    print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(et-st)*1000:.2f} ms step ({(pt-st)*1000:.2f} prep, {(gt-pt)*1000:.2f} gen, {(et-gt)*1000:.2f} eval), {clip_scores_np.mean():.4f} clip score")
+    print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(et-st)*1000:.0f} ms step ({(pt-st)*1000:.0f} prep, {(gt-pt)*1000:.0f} gen, {(et-gt)*1000:.0f} eval), {clip_scores_np.mean():.4f} clip score")
     st = et
 
   # Final Score Computation
   print("\n" + "="*80 + "\n")
-  print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.6f}")
+  print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
   final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
   fid_score = inception.compute_score(final_incp_acts, "/raid/datasets/coco2014/val2014_30k_stats.npz")
   print(f"fid_score:  {fid_score:.4f}")
