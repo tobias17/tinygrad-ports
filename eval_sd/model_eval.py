@@ -52,7 +52,7 @@ def eval_sd():
 
   @TinyJit
   def chunk_batches(z:Tensor):
-    return [b.shard(GEN_GPUS, axis=0).realize() for b in z.to(EVAL_GPU).chunk(len(GEN_GPUS))]
+    return [b.shard(GEN_GPUS, axis=0).realize() for b in z.to(EVAL_GPU).chunk(DEVICE_BS)]
   @TinyJit 
   def decode_step(z:Tensor):
     x = mdl.decode(z)
@@ -62,7 +62,7 @@ def eval_sd():
     x = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
     return x.realize(), inc_x.realize()
   @TinyJit
-  def clip_step(tokens, images):
+  def clip_step(tokens:Tensor, images:Tensor):
     return clip_enc.get_clip_score(tokens, images).realize()
 
   st = time.perf_counter()
@@ -107,16 +107,17 @@ def eval_sd():
       all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
     et = time.perf_counter()
 
-    print(f"{dataset_i:05d}: {100.0*dataset_i/len(captions):02.2f}%, {(st-pt)*1000:.2f} ms prep, {(pt-gt)*1000:.2f} ms gen, {(gt-et)*1000:.2f} ms eval")
+    curr_i = min(dataset_i+GLOBAL_BS, len(captions))
+    print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(et-st)*1000:.2f} ms step ({(pt-st)*1000:.2f} prep, {(gt-pt)*1000:.2f} gen, {(et-gt)*1000:.2f} eval), {clip_scores_np.mean():.4f} clip score")
     st = et
 
   # Final Score Computation
   print("\n" + "="*80 + "\n")
-  print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores)}")
+  print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.6f}")
   final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
   fid_score = inception.compute_score(final_incp_acts, "/raid/datasets/coco2014/val2014_30k_stats.npz")
-  print(f"fid_score:  {fid_score}")
-  print(f"wall_time:  {time.perf_counter()-start/3600:.3f} hours")
+  print(f"fid_score:  {fid_score:.4f}")
+  print(f"exec_time:  {(time.perf_counter()-start)/3600:.3f} hours")
   print("")
 
 if __name__ == "__main__":
