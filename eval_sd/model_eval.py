@@ -19,14 +19,16 @@ def eval_sd():
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 2))]
   INCP_GPU   = GPUS[1 % len(GPUS)]
   CLIP_GPU   = GPUS[2 % len(GPUS)]
-  CFG_SCALE  = getenv("CFG_SCALE", 8.0)
-  IMG_SIZE   = getenv("IMG_SIZE",  1024)
-  NUM_STEPS  = getenv("NUM_STEPS", 20)
-  DEVICE_BS  = getenv("DEVICE_BS", 2)
-  BEAM_VALUE = getenv("BEAM",      1)
-  EVALUATE   = getenv("EVALUATE",  1)
+  CFG_SCALE  = getenv("CFG_SCALE",  8.0)
+  IMG_SIZE   = getenv("IMG_SIZE",   1024)
+  NUM_STEPS  = getenv("NUM_STEPS",  20)
+  DEV_GEN_BS = getenv("DEV_GEN_BS", 2)
+  DEV_EVL_BS = getenv("DEV_EVL_BS", 2)
+  BEAM_VALUE = getenv("BEAM",       1)
+  EVALUATE   = getenv("EVALUATE",   1)
   BEAM.value = 0
-  GLOBAL_BS  = DEVICE_BS * len(GPUS)
+  GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
+  GBL_EVL_BS = DEV_EVL_BS * len(GPUS)
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
@@ -52,13 +54,13 @@ def eval_sd():
     return x.realize()
   @TinyJit
   def chunk_batches(z:Tensor):
-    return [b.shard(GPUS, axis=0).realize() for b in z.to(INCP_GPU).chunk(DEVICE_BS)]
+    return [b.shard(GPUS, axis=0).realize() for b in z.to(INCP_GPU).chunk(DEV_GEN_BS)]
 
   def gen_batch(texts):
     c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
     for t in  c.values(): t.shard_(GPUS, axis=0)
     for t in uc.values(): t.shard_(GPUS, axis=0)
-    randn = Tensor.randn(GLOBAL_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
+    randn = Tensor.randn(GBL_GEN_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
     pt = time.perf_counter()
 
     # Generate Images
@@ -72,24 +74,25 @@ def eval_sd():
 
   print("\nWarning Up")
   for _ in range(3):
-    gen_batch([""]*GLOBAL_BS)
+    gen_batch([""]*GBL_GEN_BS)
 
   print("\nFull Run")
   st = time.perf_counter()
-  for dataset_i in range(0, len(captions), GLOBAL_BS):
-    padding = 0 if (dataset_i+GLOBAL_BS <= len(captions)) else (dataset_i+GLOBAL_BS) - len(captions)
+  for dataset_i in range(0, len(captions), GBL_GEN_BS):
+    padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
 
-    ds_slice = slice(dataset_i, dataset_i+GLOBAL_BS)
+    ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
     texts = captions["caption"].array[ds_slice].tolist()
     if padding > 0: texts += ["" for _ in range(padding)]
     pil_im, pt = gen_batch(texts)
 
-    filenames = captions["file_name"].array[ds_slice].tolist()
-    assert len(filenames) == len(pil_im)
-    gens.append(zip(pil_im, filenames))
+    pad_slice = slice(None, None if padding == 0 else -padding)
+    values = [pil_im[pad_slice], texts[pad_slice], captions["file_name"].array[ds_slice].tolist()]
+    assert len(values[0]) == len(values[1]) and len(values[0]) == len(values[2])
+    gens.append(zip(*values))
     gt = time.perf_counter()
 
-    curr_i = min(dataset_i+GLOBAL_BS, len(captions))
+    curr_i = min(dataset_i+GBL_GEN_BS, len(captions))
     print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(gt-st)*1000:.0f} ms step ({(pt-st)*1000:.0f} prep, {(gt-pt)*1000:.0f} gen)")
     st = gt
 
@@ -110,24 +113,48 @@ def eval_sd():
     @TinyJit
     def clip_step(tokens:Tensor, images:Tensor):
       return clip_enc.get_clip_score(tokens, images).realize()
+    def create_batches():
+      imgs, texts, fns = [], [], []
+      for gen_batch in gens:
+        for img, text, fn in gen_batch:
+          imgs.append(img)
+          texts.append(text)
+          fns.append(fn)
+          if len(imgs) == GBL_EVL_BS:
+            yield imgs, texts, fns, 0
+            imgs, texts, fns = [], [], []
+      if len(imgs) > 0:
+        yield imgs, texts, fns, GBL_EVL_BS - len(imgs)
+    batch_iter = create_batches()
+    all_clip_scores = []
+    all_incp_act    = []
 
+    while True:
+      batch = next(batch_iter)
+      if batch is None:
+        break
+      imgs, texts, fns, pad = batch
+      if pad > 0:
+        imgs  += [imgs[-1]]*pad
+        texts += [texts[-1]]*pad
+        fns   += [fns[-1]]*pad
 
-    # Evaluate Images
-    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU).reshape(1,-1) for text in texts]
-    images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_GPU) for im in pil_im]
-    with Context(BEAM=BEAM_VALUE):
-      x_incp = Tensor.cat(*xs, dim=0)
-      clip_scores = clip_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
-      incp_act = inception(x_incp.realize())
+      # Evaluate Images
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU).reshape(1,-1) for text in texts]
+      images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_GPU) for im in pil_im]
+      with Context(BEAM=BEAM_VALUE):
+        x_incp = Tensor.cat(*xs, dim=0)
+        clip_scores = clip_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
+        incp_act = inception(x_incp.realize())
 
-    clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
-    if padding > 0: clip_scores_np = clip_scores_np[:-padding]
-    all_clip_scores += clip_scores_np.tolist()
+      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
+      if padding > 0: clip_scores_np = clip_scores_np[:-padding]
+      all_clip_scores += clip_scores_np.tolist()
 
-    if padding > 0: incp_act = incp_act[:-padding]
-    all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
-    if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
-      all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
+      if padding > 0: incp_act = incp_act[:-padding]
+      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
+      if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
+        all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
 
 
     # Final Score Computation
