@@ -5,3 +5,5 @@
 weights/*
 **/runs
 **/archive
+
+eval_sd/COCO
