@@ -12,25 +12,25 @@ def eval_sd():
   Tensor.no_grad = True
   import pandas as pd # type: ignore
   from PIL import Image
-  from tinygrad.helpers import fetch, Context, BEAM
+  from tinygrad.helpers import fetch, Context, BEAM, tqdm
   from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG # type: ignore
   from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
   from extra.models.inception import FidInceptionV3, calculate_frechet_distance # type: ignore
-  GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 2))]
-  INCP_GPU   = GPUS[1 % len(GPUS)]
-  CLIP_GPU   = GPUS[2 % len(GPUS)]
+  GPUS       = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6))]
+  CLIP_GPU   = GPUS[0]
+  INCP_GPUS  = GPUS if len(GPUS) == 1 else GPUS[1:]
   CFG_SCALE  = getenv("CFG_SCALE",  8.0)
   IMG_SIZE   = getenv("IMG_SIZE",   1024)
   NUM_STEPS  = getenv("NUM_STEPS",  20)
-  DEV_GEN_BS = getenv("DEV_GEN_BS", 3)
-  DEV_EVL_BS = getenv("DEV_EVL_BS", 2)
+  DEV_GEN_BS = getenv("DEV_GEN_BS", 8)
+  DEV_EVL_BS = getenv("DEV_EVL_BS", 16)
   GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 1))
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
   BEAM.value = 0
   GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
-  GBL_EVL_BS = DEV_EVL_BS
+  GBL_EVL_BS = DEV_EVL_BS * len(INCP_GPUS)
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
@@ -44,7 +44,8 @@ def eval_sd():
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)[:7]
+  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)
+  timings  = []
   gens     = []
 
   @TinyJit 
@@ -56,7 +57,7 @@ def eval_sd():
     return x.realize()
   @TinyJit
   def chunk_batches(z:Tensor):
-    return [b.shard(GPUS, axis=0).realize() for b in z.to(INCP_GPU).chunk(DEV_GEN_BS)]
+    return [b.shard(GPUS, axis=0).realize() for b in z.to(GPUS[0]).chunk(DEV_GEN_BS)]
 
   def gen_batch(texts):
     # Prepare Inputs
@@ -78,9 +79,10 @@ def eval_sd():
   print("\nWarming Up")
   for _ in range(WARMUP):
     gen_batch([""]*GBL_GEN_BS)
+  timings.append(("Prepare", time.perf_counter() - start))
 
   print("\nFull Run")
-  st = time.perf_counter()
+  gen_start = st = time.perf_counter()
   for dataset_i in range(0, len(captions), GBL_GEN_BS):
     padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
 
@@ -98,12 +100,16 @@ def eval_sd():
     curr_i = min(dataset_i+GBL_GEN_BS, len(captions))
     print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(gt-st)*1000:.0f} ms step ({(pt-st)*1000:.0f} prep, {(gt-pt)*1000:.0f} gen)")
     st = gt
+  eval_start = time.perf_counter()
+  timings.append(("Generate", eval_start - gen_start))
 
   decode_step.reset()
   chunk_batches.reset()
 
   # Evaluation
   if EVALUATE > 0:
+    print("\nEvaluating")
+
     # Load Evaluation Data
     tokenizer = Tokenizer.ClipTokenizer()
     clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
@@ -111,7 +117,7 @@ def eval_sd():
     load_state_dict(clip_enc, torch_load(weights_path), strict=False)
     for w in get_parameters(clip_enc): w.replace(w.cast(dtypes.float16).to(CLIP_GPU)).realize()
     inception = FidInceptionV3().load_from_pretrained()
-    for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).to(INCP_GPU)).realize()
+    for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).shard(INCP_GPUS)).realize()
 
     @TinyJit
     def clip_step(tokens:Tensor, images:Tensor):
@@ -133,6 +139,7 @@ def eval_sd():
     all_clip_scores = []
     all_incp_acts   = [[], []]
 
+    tracker = tqdm(total=len(captions))
     while True:
       # Prepare Inputs
       batch = next(batch_iter)
@@ -143,19 +150,15 @@ def eval_sd():
         imgs  += [imgs [-1]]*padding
         texts += [texts[-1]]*padding
         fns   += [fns  [-1]]*padding
-      print(f"{len(imgs)=}")
-      print(f"{len(texts)=}")
-      print(f"{len(fns)=}")
-      print(f"{padding=}")
 
       # Evaluate Images
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
-      images = [clip_enc.prepare_image(im).to(CLIP_GPU) for im in imgs]
+      images = [clip_enc.prepare_image(im) for im in imgs]
       incp_imgs = [Image.open(f"COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
-      incp_xs   = [Tensor(np.array(im), device=INCP_GPU).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
+      incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
       with Context(BEAM=EVL_BEAM):
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
-        incp_act = inception(Tensor.stack(*incp_xs, dim=0).realize())
+        incp_act = inception(Tensor.stack(*incp_xs, dim=0).shard(INCP_GPUS, axis=0).realize()).to(INCP_GPUS[0])
 
       clip_scores_np = (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
       if padding > 0: clip_scores_np = clip_scores_np[:-padding]
@@ -167,6 +170,8 @@ def eval_sd():
         if len(all_act_z) >= MAX_INCP_STORE_SIZE:
           all_act_z.clear()
           all_act_z += [Tensor.cat(*all_act_z, dim=0).realize()]
+      
+      tracker.update(GBL_EVL_BS - padding)
 
     # Final Score Computation
     all_incp_acts_1 = Tensor.cat(*all_incp_acts[0], dim=0).realize()
@@ -177,11 +182,22 @@ def eval_sd():
     s2 = np.cov(all_incp_acts_2.numpy(), rowvar=False)
     fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
-    print("\n" + "="*80 + "\n")
+    timings.append(("Evaluate", time.perf_counter() - eval_start))
+
+    print("\n\n" + "="*80 + "\n")
     print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
     print(f"fid_score:  {fid_score:.4f}")
-    print(f"exec_time:  {(time.perf_counter()-start)/3600:.3f} hours")
     print("")
+
+  timings.append(("Total", time.perf_counter() - start))
+  print("+----------+-------+")
+  print("| Phase    | Hours |")
+  print("+----------+-------+")
+  for name, amount in timings:
+    print(f"| {name}{' '*(8-len(name))} | {amount/3600: >.3f}{''} |")
+  print("+----------+-------+")
+
+  print(f"\n{len(captions) / (eval_start - gen_start):.5f} imgs/sec generated\n")
 
 if __name__ == "__main__":
   eval_sd()
