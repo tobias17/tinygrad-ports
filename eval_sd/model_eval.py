@@ -22,15 +22,15 @@ def eval_sd():
   CFG_SCALE  = getenv("CFG_SCALE",  8.0)
   IMG_SIZE   = getenv("IMG_SIZE",   1024)
   NUM_STEPS  = getenv("NUM_STEPS",  20)
-  DEV_GEN_BS = getenv("DEV_GEN_BS", 2)
-  DEV_EVL_BS = getenv("DEV_EVL_BS", 3)
+  DEV_GEN_BS = getenv("DEV_GEN_BS", 3)
+  DEV_EVL_BS = getenv("DEV_EVL_BS", 2)
   GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 1))
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
   BEAM.value = 0
   GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
-  GBL_EVL_BS = DEV_EVL_BS * len(GPUS)
+  GBL_EVL_BS = DEV_EVL_BS
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
@@ -44,7 +44,7 @@ def eval_sd():
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)[:4]
+  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)[:7]
   gens     = []
 
   @TinyJit 
@@ -128,6 +128,7 @@ def eval_sd():
             imgs, texts, fns = [], [], []
       if len(imgs) > 0:
         yield imgs, texts, fns, GBL_EVL_BS - len(imgs)
+      yield None
     batch_iter = create_batches()
     all_clip_scores = []
     all_incp_acts   = [[], []]
@@ -151,7 +152,7 @@ def eval_sd():
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
       images = [clip_enc.prepare_image(im).to(CLIP_GPU) for im in imgs]
       incp_imgs = [Image.open(f"COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
-      incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(0,3,1,2).interpolate((299,299), mode='linear') for im in incp_imgs]
+      incp_xs   = [Tensor(np.array(im), device=INCP_GPU).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
       with Context(BEAM=EVL_BEAM):
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
         incp_act = inception(Tensor.stack(*incp_xs, dim=0).realize())
@@ -168,10 +169,12 @@ def eval_sd():
           all_act_z += [Tensor.cat(*all_act_z, dim=0).realize()]
 
     # Final Score Computation
-    m1 = all_incp_acts[0].mean(axis=0).numpy()
-    s1 = np.cov(all_incp_acts[0].numpy(), rowvar=False)
-    m2 = all_incp_acts[1].mean(axis=0).numpy()
-    s2 = np.cov(all_incp_acts[1].numpy(), rowvar=False)
+    all_incp_acts_1 = Tensor.cat(*all_incp_acts[0], dim=0).realize()
+    m1 = all_incp_acts_1.mean(axis=0).numpy()
+    s1 = np.cov(all_incp_acts_1.numpy(), rowvar=False)
+    all_incp_acts_2 = Tensor.cat(*all_incp_acts[1], dim=0).realize()
+    m2 = all_incp_acts_2.mean(axis=0).numpy()
+    s2 = np.cov(all_incp_acts_2.numpy(), rowvar=False)
     fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
     print("\n" + "="*80 + "\n")
