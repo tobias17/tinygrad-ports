@@ -15,7 +15,7 @@ def eval_sd():
   from tinygrad.helpers import fetch, Context, BEAM
   from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG # type: ignore
   from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
-  from extra.models.inception import FidInceptionV3 # type: ignore
+  from extra.models.inception import FidInceptionV3, calculate_frechet_distance # type: ignore
   GPUS = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 2))]
   INCP_GPU   = GPUS[1 % len(GPUS)]
   CLIP_GPU   = GPUS[2 % len(GPUS)]
@@ -23,8 +23,10 @@ def eval_sd():
   IMG_SIZE   = getenv("IMG_SIZE",   1024)
   NUM_STEPS  = getenv("NUM_STEPS",  20)
   DEV_GEN_BS = getenv("DEV_GEN_BS", 2)
-  DEV_EVL_BS = getenv("DEV_EVL_BS", 2)
-  BEAM_VALUE = getenv("BEAM",       1)
+  DEV_EVL_BS = getenv("DEV_EVL_BS", 3)
+  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 1))
+  EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
+  WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
   BEAM.value = 0
   GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
@@ -42,7 +44,7 @@ def eval_sd():
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)[:8]
+  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)[:4]
   gens     = []
 
   @TinyJit 
@@ -57,6 +59,7 @@ def eval_sd():
     return [b.shard(GPUS, axis=0).realize() for b in z.to(INCP_GPU).chunk(DEV_GEN_BS)]
 
   def gen_batch(texts):
+    # Prepare Inputs
     c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
     for t in  c.values(): t.shard_(GPUS, axis=0)
     for t in uc.values(): t.shard_(GPUS, axis=0)
@@ -64,7 +67,7 @@ def eval_sd():
     pt = time.perf_counter()
 
     # Generate Images
-    with Context(BEAM=BEAM_VALUE):
+    with Context(BEAM=GEN_BEAM):
       z = sampler(mdl.denoise, randn, c, uc, NUM_STEPS).realize()
       pil_im = []
       for b_in in chunk_batches(z.realize()):
@@ -72,8 +75,8 @@ def eval_sd():
         pil_im += [Image.fromarray(b_np[image_i]) for image_i in range(len(GPUS))]
     return pil_im, pt
 
-  print("\nWarning Up")
-  for _ in range(3):
+  print("\nWarming Up")
+  for _ in range(WARMUP):
     gen_batch([""]*GBL_GEN_BS)
 
   print("\nFull Run")
@@ -127,41 +130,52 @@ def eval_sd():
         yield imgs, texts, fns, GBL_EVL_BS - len(imgs)
     batch_iter = create_batches()
     all_clip_scores = []
-    all_incp_act    = []
+    all_incp_acts   = [[], []]
 
     while True:
+      # Prepare Inputs
       batch = next(batch_iter)
       if batch is None:
         break
-      imgs, texts, fns, pad = batch
-      if pad > 0:
-        imgs  += [imgs[-1]]*pad
-        texts += [texts[-1]]*pad
-        fns   += [fns[-1]]*pad
+      imgs, texts, fns, padding = batch
+      if padding > 0:
+        imgs  += [imgs [-1]]*padding
+        texts += [texts[-1]]*padding
+        fns   += [fns  [-1]]*padding
+      print(f"{len(imgs)=}")
+      print(f"{len(texts)=}")
+      print(f"{len(fns)=}")
+      print(f"{padding=}")
 
       # Evaluate Images
-      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU).reshape(1,-1) for text in texts]
-      images = [clip_enc.prepare_image(im).unsqueeze(0).to(CLIP_GPU) for im in pil_im]
-      with Context(BEAM=BEAM_VALUE):
-        x_incp = Tensor.cat(*xs, dim=0)
-        clip_scores = clip_step(Tensor.cat(*tokens, dim=0).realize(), Tensor.cat(*images, dim=0).realize())
-        incp_act = inception(x_incp.realize())
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
+      images = [clip_enc.prepare_image(im).to(CLIP_GPU) for im in imgs]
+      incp_imgs = [Image.open(f"COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
+      incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(0,3,1,2).interpolate((299,299), mode='linear') for im in incp_imgs]
+      with Context(BEAM=EVL_BEAM):
+        clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
+        incp_act = inception(Tensor.stack(*incp_xs, dim=0).realize())
 
-      clip_scores_np = (clip_scores * Tensor.eye(GLOBAL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
+      clip_scores_np = (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
       if padding > 0: clip_scores_np = clip_scores_np[:-padding]
       all_clip_scores += clip_scores_np.tolist()
 
-      if padding > 0: incp_act = incp_act[:-padding]
-      all_incp_act.append(incp_act.reshape(incp_act.shape[:2]).realize())
-      if len(all_incp_act) >= MAX_INCP_STORE_SIZE:
-        all_incp_act = [Tensor.cat(*all_incp_act, dim=0).realize()]
-
+      for incp_act_z, all_act_z in zip(incp_act.chunk(2), all_incp_acts):
+        if padding > 0: incp_act_z = incp_act_z[:-padding]
+        all_act_z.append(incp_act_z.reshape(incp_act_z.shape[:2]).realize())
+        if len(all_act_z) >= MAX_INCP_STORE_SIZE:
+          all_act_z.clear()
+          all_act_z += [Tensor.cat(*all_act_z, dim=0).realize()]
 
     # Final Score Computation
+    m1 = all_incp_acts[0].mean(axis=0).numpy()
+    s1 = np.cov(all_incp_acts[0].numpy(), rowvar=False)
+    m2 = all_incp_acts[1].mean(axis=0).numpy()
+    s2 = np.cov(all_incp_acts[1].numpy(), rowvar=False)
+    fid_score = calculate_frechet_distance(m1, s1, m2, s2)
+
     print("\n" + "="*80 + "\n")
     print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
-    final_incp_acts = Tensor.cat(*all_incp_act, dim=0)
-    fid_score = inception.compute_score(final_incp_acts, "COCO/coco2014/latents.npy")
     print(f"fid_score:  {fid_score:.4f}")
     print(f"exec_time:  {(time.perf_counter()-start)/3600:.3f} hours")
     print("")
