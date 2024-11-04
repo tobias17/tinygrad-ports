@@ -22,9 +22,9 @@ def eval_sd():
   CFG_SCALE  = getenv("CFG_SCALE",  8.0)
   IMG_SIZE   = getenv("IMG_SIZE",   1024)
   NUM_STEPS  = getenv("NUM_STEPS",  20)
-  DEV_GEN_BS = getenv("DEV_GEN_BS", 8)
+  DEV_GEN_BS = getenv("DEV_GEN_BS", 7)
   DEV_EVL_BS = getenv("DEV_EVL_BS", 16)
-  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 1))
+  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 20))
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
@@ -98,7 +98,7 @@ def eval_sd():
     gt = time.perf_counter()
 
     curr_i = min(dataset_i+GBL_GEN_BS, len(captions))
-    print(f"{curr_i:05d}: {100.0*curr_i/len(captions):02.2f}%, {(gt-st)*1000:.0f} ms step ({(pt-st)*1000:.0f} prep, {(gt-pt)*1000:.0f} gen)")
+    print(f"{curr_i:04d}: {100.0*curr_i/len(captions):02.2f}%, {(gt-st)*1000:.0f} ms step ({(pt-st)*1000:.0f} prep, {(gt-pt)*1000:.0f} gen)")
     st = gt
   eval_start = time.perf_counter()
   timings.append(("Generate", eval_start - gen_start))
@@ -170,7 +170,7 @@ def eval_sd():
         if len(all_act_z) >= MAX_INCP_STORE_SIZE:
           all_act_z.clear()
           all_act_z += [Tensor.cat(*all_act_z, dim=0).realize()]
-      
+
       tracker.update(GBL_EVL_BS - padding)
 
     # Final Score Computation
@@ -185,19 +185,19 @@ def eval_sd():
     timings.append(("Evaluate", time.perf_counter() - eval_start))
 
     print("\n\n" + "="*80 + "\n")
-    print(f"clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
-    print(f"fid_score:  {fid_score:.4f}")
+    print(f" clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
+    print(f" fid_score:  {fid_score:.4f}")
     print("")
 
   timings.append(("Total", time.perf_counter() - start))
-  print("+----------+-------+")
-  print("| Phase    | Hours |")
-  print("+----------+-------+")
+  print(" +----------+-------+")
+  print(" | Phase    | Hours |")
+  print(" +----------+-------+")
   for name, amount in timings:
-    print(f"| {name}{' '*(8-len(name))} | {amount/3600: >.3f}{''} |")
-  print("+----------+-------+")
+    print(f" | {name}{' '*(8-len(name))} | {amount/3600: >.3f}{''} |")
+  print(" +----------+-------+")
 
-  print(f"\n{len(captions) / (eval_start - gen_start):.5f} imgs/sec generated\n")
+  print(f"\n {len(captions) / (eval_start - gen_start):.5f} imgs/sec generated\n")
 
 if __name__ == "__main__":
   eval_sd()
