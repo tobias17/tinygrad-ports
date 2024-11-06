@@ -9,7 +9,6 @@ def tlog(x): print(f"{x:25s}  @ {time.perf_counter()-start:5.2f}s")
 
 def eval_sdxl():
   # Imports and Settings
-  Tensor.no_grad = True
   import pandas as pd
   from PIL import Image
   from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG
@@ -27,10 +26,10 @@ def eval_sdxl():
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
-  BEAM.value = 0
+  DATASET    = "extra/datasets/COCO/coco2014_5k"
   GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
   GBL_EVL_BS = DEV_EVL_BS * len(INCP_GPUS)
-  DATASET    = "extra/datasets/COCO/coco2014_5k"
+  BEAM.value = 0
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
@@ -47,7 +46,7 @@ def eval_sdxl():
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
   timings  = []
 
-  class GenerationContainer:
+  class GenerationsContainer:
     imgs = []
     txts = []
     fns  = []
@@ -63,10 +62,10 @@ def eval_sdxl():
         padding = 0
       imgs, self.imgs = self.imgs[:amount], self.imgs[amount:]
       txts, self.txts = self.txts[:amount], self.txts[amount:]
-      fns,  self.fns  = self.fns [:amount], self.fns [amount:]
+      fns , self.fns  = self.fns [:amount], self.fns [amount:]
       self.assert_all_same_size()
       return imgs, txts, fns, padding
-  gens = GenerationContainer()
+  gens = GenerationsContainer()
 
   @TinyJit
   def chunk_batches(z:Tensor):
@@ -85,7 +84,6 @@ def eval_sdxl():
     for t in uc.values(): t.shard_(GPUS, axis=0)
     randn = Tensor.randn(GBL_GEN_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
     pt = time.perf_counter()
-
     with Context(BEAM=GEN_BEAM):
       z = sampler(mdl.denoise, randn, c, uc, NUM_STEPS).realize()
       pil_im = []
@@ -160,16 +158,11 @@ def eval_sdxl():
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
         incp_act = inception(Tensor.stack(*incp_xs, dim=0).shard(INCP_GPUS, axis=0).realize()).to(INCP_GPUS[0])
 
-      clip_scores_np = (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1).numpy()
-      if padding > 0: clip_scores_np = clip_scores_np[:-padding]
-      all_clip_scores += clip_scores_np.tolist()
-
+      pad_slice = slice(None, None if padding == 0 else -padding)
+      all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
       incp_act_1, incp_act_2 = incp_act.chunk(2)
-      if padding > 0:
-        incp_act_1 = incp_act_1[:-padding]
-        incp_act_2 = incp_act_2[:-padding]
-      all_incp_acts_1.append(incp_act_1.reshape(incp_act_1.shape[:2]).realize())
-      all_incp_acts_2.append(incp_act_2.reshape(incp_act_2.shape[:2]).realize())
+      all_incp_acts_1.append(incp_act_1[pad_slice].squeeze(0).squeeze(0).realize())
+      all_incp_acts_2.append(incp_act_2[pad_slice].squeeze(0).squeeze(0).realize())
 
       tracker.update(GBL_EVL_BS - padding)
 
@@ -194,4 +187,9 @@ def eval_sdxl():
   print(f"\n {len(captions) / (eval_start - gen_start):.5f} imgs/sec generated\n")
 
 if __name__ == "__main__":
+  # inference only
+  Tensor.training = False
+  Tensor.no_grad = True
+
+  print(f"eval sdxl")
   eval_sdxl()
