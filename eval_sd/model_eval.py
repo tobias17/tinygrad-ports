@@ -3,22 +3,21 @@ start = time.perf_counter()
 from pathlib import Path
 import numpy as np
 from tinygrad import Tensor, Device, dtypes, GlobalCounters, TinyJit
-from tinygrad.nn.state import get_parameters, load_state_dict, safe_load, get_state_dict, torch_load
-from tinygrad.helpers import getenv
+from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, torch_load
+from tinygrad.helpers import getenv, fetch, Context, BEAM, tqdm
 def tlog(x): print(f"{x:25s}  @ {time.perf_counter()-start:5.2f}s")
 
-def eval_sd():
+def eval_sdxl():
   # Imports and Settings
   Tensor.no_grad = True
-  import pandas as pd # type: ignore
+  import pandas as pd
   from PIL import Image
-  from tinygrad.helpers import fetch, Context, BEAM, tqdm
-  from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG # type: ignore
-  from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
-  from extra.models.inception import FidInceptionV3, calculate_frechet_distance # type: ignore
-  GPUS       = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6))]
+  from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG
+  from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer
+  from extra.models.inception import FidInceptionV3, compute_mu_and_sigma, calculate_frechet_distance
+  GPUS       = tuple(f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6)))
   CLIP_GPU   = GPUS[0]
-  INCP_GPUS  = GPUS if len(GPUS) == 1 else GPUS[1:]
+  INCP_GPUS  = GPUS if len(GPUS) == 1 else tuple(GPUS[1:])
   CFG_SCALE  = getenv("CFG_SCALE",  8.0)
   IMG_SIZE   = getenv("IMG_SIZE",   1024)
   NUM_STEPS  = getenv("NUM_STEPS",  20)
@@ -38,15 +37,37 @@ def eval_sd():
 
   # Configure Models and Load Weights
   mdl = SDXL(configs["SDXL_Base"])
-  load_state_dict(mdl, safe_load(fetch("https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors", "sd_xl_base_1.0.safetensors")), strict=False)
+  url = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+  load_state_dict(mdl, safe_load(str(fetch(url, "sd_xl_base_1.0.safetensors"))), strict=False)
   for k,w in get_state_dict(mdl).items():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k == "sigmas":
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("COCO/coco2014/captions.tsv", sep='\t', header=0)
+  captions = pd.read_csv("extra/datasets/COCO/coco2014/captions.tsv", sep='\t', header=0)
   timings  = []
-  gens     = []
+
+  class Gens:
+    imgs = []
+    txts = []
+    fns  = []
+    def assert_all_same_size(self):
+      assert len(self.imgs) == len(self.txts) and len(self.imgs) == len(self.fns)
+    def slice_batch(self, amount:int):
+      if len(self.imgs) < GBL_EVL_BS:
+        padding = GBL_EVL_BS - len(self.imgs)
+        self.imgs += [self.imgs[-1]]*padding
+        self.txts += [self.txts[-1]]*padding
+        self.fns  += [self.fns [-1]]*padding
+      else:
+        padding = 0
+      imgs, self.imgs = self.imgs[:GBL_EVL_BS], self.imgs[GBL_EVL_BS:]
+      txts, self.txts = self.txts[:GBL_EVL_BS], self.txts[GBL_EVL_BS:]
+      fns,  self.fns  = self.fns [:GBL_EVL_BS], self.fns [GBL_EVL_BS:]
+      self.assert_all_same_size()
+      return imgs, txts, fns, padding
+
+  gens = Gens()
 
   @TinyJit 
   def decode_step(z:Tensor) -> Tensor:
@@ -88,13 +109,13 @@ def eval_sd():
 
     ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
     texts = captions["caption"].array[ds_slice].tolist()
+    gens.txts += texts
     if padding > 0: texts += ["" for _ in range(padding)]
     pil_im, pt = gen_batch(texts)
 
-    pad_slice = slice(None, None if padding == 0 else -padding)
-    values = [pil_im[pad_slice], texts[pad_slice], captions["file_name"].array[ds_slice].tolist()]
-    assert len(values[0]) == len(values[1]) and len(values[0]) == len(values[2])
-    gens.append(zip(*values))
+    gens.imgs += pil_im[:(None if padding == 0 else -padding)]
+    gens.fns  += captions["file_name"].array[ds_slice].tolist()
+    gens.assert_all_same_size()
     gt = time.perf_counter()
 
     curr_i = min(dataset_i+GBL_GEN_BS, len(captions))
@@ -113,8 +134,8 @@ def eval_sd():
     # Load Evaluation Data
     tokenizer = Tokenizer.ClipTokenizer()
     clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
-    weights_path = fetch("https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin", "CLIP-ViT-H-14-laion2B-s32B-b79K.bin")
-    load_state_dict(clip_enc, torch_load(weights_path), strict=False)
+    url = "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
+    load_state_dict(clip_enc, torch_load(str(fetch(url, "CLIP-ViT-H-14-laion2B-s32B-b79K.bin"))), strict=False)
     for w in get_parameters(clip_enc): w.replace(w.cast(dtypes.float16).to(CLIP_GPU)).realize()
     inception = FidInceptionV3().load_from_pretrained()
     for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).shard(INCP_GPUS)).realize()
@@ -122,39 +143,19 @@ def eval_sd():
     @TinyJit
     def clip_step(tokens:Tensor, images:Tensor):
       return clip_enc.get_clip_score(tokens, images).realize()
-    def create_batches():
-      imgs, texts, fns = [], [], []
-      for gen_batch in gens:
-        for img, text, fn in gen_batch:
-          imgs.append(img)
-          texts.append(text)
-          fns.append(fn)
-          if len(imgs) == GBL_EVL_BS:
-            yield imgs, texts, fns, 0
-            imgs, texts, fns = [], [], []
-      if len(imgs) > 0:
-        yield imgs, texts, fns, GBL_EVL_BS - len(imgs)
-      yield None
-    batch_iter = create_batches()
+
     all_clip_scores = []
-    all_incp_acts   = [[], []]
+    all_incp_acts_1 = []
+    all_incp_acts_2 = []
 
     tracker = tqdm(total=len(captions))
-    while True:
-      # Prepare Inputs
-      batch = next(batch_iter)
-      if batch is None:
-        break
-      imgs, texts, fns, padding = batch
-      if padding > 0:
-        imgs  += [imgs [-1]]*padding
-        texts += [texts[-1]]*padding
-        fns   += [fns  [-1]]*padding
+    while len(gens.imgs) > 0:
+      imgs, texts, fns, padding = gens.slice_batch(GBL_EVL_BS)
 
       # Evaluate Images
-      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts] = gens.slice_batch(GBL_EVL_BS)
       images = [clip_enc.prepare_image(im) for im in imgs]
-      incp_imgs = [Image.open(f"COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
+      incp_imgs = [Image.open(f"extra/datasets/COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
       incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
       with Context(BEAM=EVL_BEAM):
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
@@ -164,22 +165,21 @@ def eval_sd():
       if padding > 0: clip_scores_np = clip_scores_np[:-padding]
       all_clip_scores += clip_scores_np.tolist()
 
-      for incp_act_z, all_act_z in zip(incp_act.chunk(2), all_incp_acts):
-        if padding > 0: incp_act_z = incp_act_z[:-padding]
-        all_act_z.append(incp_act_z.reshape(incp_act_z.shape[:2]).realize())
-        if len(all_act_z) >= MAX_INCP_STORE_SIZE:
-          all_act_z.clear()
-          all_act_z += [Tensor.cat(*all_act_z, dim=0).realize()]
+      incp_act_1, incp_act_2 = incp_act.chunk(2)
+      if padding > 0:
+        incp_act_1 = incp_act_1[:-padding]
+        incp_act_2 = incp_act_2[:-padding]
+      all_incp_acts_1.append(incp_act_1.reshape(incp_act_1.shape[:2]).realize())
+      all_incp_acts_2.append(incp_act_2.reshape(incp_act_2.shape[:2]).realize())
+      if len(all_incp_acts_1) >= MAX_INCP_STORE_SIZE:
+        all_incp_acts_1 = [Tensor.cat(*all_incp_acts_1, dim=0).realize()]
+        all_incp_acts_2 = [Tensor.cat(*all_incp_acts_2, dim=0).realize()]
 
       tracker.update(GBL_EVL_BS - padding)
 
     # Final Score Computation
-    all_incp_acts_1 = Tensor.cat(*all_incp_acts[0], dim=0).realize()
-    m1 = all_incp_acts_1.mean(axis=0).numpy()
-    s1 = np.cov(all_incp_acts_1.numpy(), rowvar=False)
-    all_incp_acts_2 = Tensor.cat(*all_incp_acts[1], dim=0).realize()
-    m2 = all_incp_acts_2.mean(axis=0).numpy()
-    s2 = np.cov(all_incp_acts_2.numpy(), rowvar=False)
+    m1, s1 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_1, dim=0).realize())
+    m2, s2 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_2, dim=0).realize())
     fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
     timings.append(("Evaluate", time.perf_counter() - eval_start))
@@ -187,10 +187,9 @@ def eval_sd():
     print("\n\n" + "="*80 + "\n")
     print(f" clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
     print(f" fid_score:  {fid_score:.4f}")
-    print("")
 
   timings.append(("Total", time.perf_counter() - start))
-  print(" +----------+-------+")
+  print("\n +----------+-------+")
   print(" | Phase    | Hours |")
   print(" +----------+-------+")
   for name, amount in timings:
@@ -200,4 +199,4 @@ def eval_sd():
   print(f"\n {len(captions) / (eval_start - gen_start):.5f} imgs/sec generated\n")
 
 if __name__ == "__main__":
-  eval_sd()
+  eval_sdxl()
