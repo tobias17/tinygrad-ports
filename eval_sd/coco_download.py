@@ -12,13 +12,14 @@ def download_coco2014_5k(extra_args):
   import zipfile
 
   parser = argparse.ArgumentParser()
-  parser.add_argument('-i', '--download-images', action='store_true')
+  parser.add_argument('-d', '--download-images', action='store_true')
+  parser.add_argument('-v', '--verify-images', action='store_true')
   parser.add_argument('-n', '--num-workers', type=int, default=1)
   args = parser.parse_args(args=extra_args)
 
   MAX_IMAGES = 5000
   SEED = 2023
-  rootdir = BASEDIR/'coco2014'
+  rootdir = BASEDIR/'coco2014_5k'
   rootdir.mkdir(exist_ok=True)
 
   output_filepath = rootdir/"captions.tsv"
@@ -69,18 +70,37 @@ def download_coco2014_5k(extra_args):
     calibration_dirpath.mkdir(exist_ok=True)
     df_annotations = pd.read_csv(str(output_filepath), sep="\t")
     tasks = [(row["coco_url"], str(calibration_dirpath), row["file_name"]) for _,row in df_annotations.iterrows()]
-    pool = Pool(processes=args.num_workers)
     def download_img(args):
       img_url, target_folder, file_name = args
       dest_path = f"{target_folder}/{file_name}"
-      if os.path.exists(dest_path):
-        print(f"WARNING: Image {file_name} found locally, skipping download")
-      else:
+      if not os.path.exists(dest_path):
         urllib.request.urlretrieve(img_url, dest_path)
     for task in tqdm(tasks):
       download_img(task)
-    # for _ in tqdm(pool.imap_unordered(download_img, tasks), total=len(tasks)):
-    #   pass
+    
+  if args.verify_images:
+    from tinygrad import Tensor
+    from PIL import Image
+    import numpy as np
+    df_annotations = pd.read_csv(str(output_filepath), sep="\t")
+    calibration_dirpath = rootdir/"calibration/"
+    if not calibration_dirpath.exists():
+      print("ERROR: calibration_dirpath did not exist, make sure to --download-images")
+    else:
+      print("Verifying images...")
+      total, ok_count = 0, 0
+      for filename in tqdm(df_annotations["file_name"]):
+        total += 1
+        image_filepath = calibration_dirpath/filename
+        if not image_filepath.exists():
+          print(f"ERROR: missing image {filename}")
+        else:
+          try:
+            Tensor(np.array(Image.open(image_filepath))).realize()
+            ok_count += 1
+          except Exception as ex:
+            print(f"ERROR: Got exception loading {filename}, {ex}")
+    print(f"Verified {ok_count}/{total} images downloaded ok")
 
   latents_filepath = rootdir/"latents.npy"
   if not latents_filepath.exists():
