@@ -23,17 +23,17 @@ def eval_sdxl():
   NUM_STEPS  = getenv("NUM_STEPS",  20)
   DEV_GEN_BS = getenv("DEV_GEN_BS", 7)
   DEV_EVL_BS = getenv("DEV_EVL_BS", 16)
-  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 20))
+  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 5))
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
   BEAM.value = 0
   GBL_GEN_BS = DEV_GEN_BS * len(GPUS)
   GBL_EVL_BS = DEV_EVL_BS * len(INCP_GPUS)
+  DATASET    = "extra/datasets/COCO/coco2014_5k"
   LAT_SCALE  = 8
   LAT_SIZE   = IMG_SIZE // LAT_SCALE
   assert LAT_SIZE * LAT_SCALE == IMG_SIZE
-  MAX_INCP_STORE_SIZE = 32
 
   # Configure Models and Load Weights
   mdl = SDXL(configs["SDXL_Base"])
@@ -43,32 +43,34 @@ def eval_sdxl():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k == "sigmas":
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
+  captions = pd.read_csv(f"{DATASET}/captions.tsv", sep='\t', header=0)
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
-  captions = pd.read_csv("extra/datasets/COCO/coco2014/captions.tsv", sep='\t', header=0)
   timings  = []
 
-  class Gens:
+  class GenerationContainer:
     imgs = []
     txts = []
     fns  = []
     def assert_all_same_size(self):
       assert len(self.imgs) == len(self.txts) and len(self.imgs) == len(self.fns)
     def slice_batch(self, amount:int):
-      if len(self.imgs) < GBL_EVL_BS:
-        padding = GBL_EVL_BS - len(self.imgs)
+      if len(self.imgs) < amount:
+        padding = amount - len(self.imgs)
         self.imgs += [self.imgs[-1]]*padding
         self.txts += [self.txts[-1]]*padding
         self.fns  += [self.fns [-1]]*padding
       else:
         padding = 0
-      imgs, self.imgs = self.imgs[:GBL_EVL_BS], self.imgs[GBL_EVL_BS:]
-      txts, self.txts = self.txts[:GBL_EVL_BS], self.txts[GBL_EVL_BS:]
-      fns,  self.fns  = self.fns [:GBL_EVL_BS], self.fns [GBL_EVL_BS:]
+      imgs, self.imgs = self.imgs[:amount], self.imgs[amount:]
+      txts, self.txts = self.txts[:amount], self.txts[amount:]
+      fns,  self.fns  = self.fns [:amount], self.fns [amount:]
       self.assert_all_same_size()
       return imgs, txts, fns, padding
+  gens = GenerationContainer()
 
-  gens = Gens()
-
+  @TinyJit
+  def chunk_batches(z:Tensor):
+    return [b.shard(GPUS, axis=0).realize() for b in z.to(GPUS[0]).chunk(DEV_GEN_BS)]
   @TinyJit 
   def decode_step(z:Tensor) -> Tensor:
     x = mdl.decode(z)
@@ -76,19 +78,14 @@ def eval_sdxl():
     x = x.reshape(z.shape[0],3,IMG_SIZE,IMG_SIZE)
     x = x.permute(0,2,3,1).clip(0,1).mul(255).cast(dtypes.uint8)
     return x.realize()
-  @TinyJit
-  def chunk_batches(z:Tensor):
-    return [b.shard(GPUS, axis=0).realize() for b in z.to(GPUS[0]).chunk(DEV_GEN_BS)]
 
   def gen_batch(texts):
-    # Prepare Inputs
     c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
     for t in  c.values(): t.shard_(GPUS, axis=0)
     for t in uc.values(): t.shard_(GPUS, axis=0)
     randn = Tensor.randn(GBL_GEN_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
     pt = time.perf_counter()
 
-    # Generate Images
     with Context(BEAM=GEN_BEAM):
       z = sampler(mdl.denoise, randn, c, uc, NUM_STEPS).realize()
       pil_im = []
@@ -124,14 +121,16 @@ def eval_sdxl():
   eval_start = time.perf_counter()
   timings.append(("Generate", eval_start - gen_start))
 
+  # Cleanup Generation Memory
   decode_step.reset()
   chunk_batches.reset()
+  del mdl
 
   # Evaluation
   if EVALUATE > 0:
     print("\nEvaluating")
 
-    # Load Evaluation Data
+    # Load Evaluation Models
     tokenizer = Tokenizer.ClipTokenizer()
     clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
     url = "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
@@ -153,9 +152,9 @@ def eval_sdxl():
       imgs, texts, fns, padding = gens.slice_batch(GBL_EVL_BS)
 
       # Evaluate Images
-      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts] = gens.slice_batch(GBL_EVL_BS)
+      tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
       images = [clip_enc.prepare_image(im) for im in imgs]
-      incp_imgs = [Image.open(f"extra/datasets/COCO/coco2014/calibration/{fn}") for fn in fns] + imgs
+      incp_imgs = [Image.open(f"{DATASET}/calibration/{fn}") for fn in fns] + imgs
       incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
       with Context(BEAM=EVL_BEAM):
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
@@ -171,9 +170,6 @@ def eval_sdxl():
         incp_act_2 = incp_act_2[:-padding]
       all_incp_acts_1.append(incp_act_1.reshape(incp_act_1.shape[:2]).realize())
       all_incp_acts_2.append(incp_act_2.reshape(incp_act_2.shape[:2]).realize())
-      if len(all_incp_acts_1) >= MAX_INCP_STORE_SIZE:
-        all_incp_acts_1 = [Tensor.cat(*all_incp_acts_1, dim=0).realize()]
-        all_incp_acts_2 = [Tensor.cat(*all_incp_acts_2, dim=0).realize()]
 
       tracker.update(GBL_EVL_BS - padding)
 
@@ -184,8 +180,7 @@ def eval_sdxl():
 
     timings.append(("Evaluate", time.perf_counter() - eval_start))
 
-    print("\n\n" + "="*80 + "\n")
-    print(f" clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
+    print(f"\n clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
     print(f" fid_score:  {fid_score:.4f}")
 
   timings.append(("Total", time.perf_counter() - start))
