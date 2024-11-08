@@ -22,7 +22,7 @@ def eval_sdxl():
   NUM_STEPS  = getenv("NUM_STEPS",  20)
   DEV_GEN_BS = getenv("DEV_GEN_BS", 7)
   DEV_EVL_BS = getenv("DEV_EVL_BS", 16)
-  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 5))
+  GEN_BEAM   = getenv("GEN_BEAM",   getenv("BEAM", 20))
   EVL_BEAM   = getenv("EVL_BEAM",   getenv("BEAM", 0))
   WARMUP     = getenv("WARMUP",     3)
   EVALUATE   = getenv("EVALUATE",   1)
@@ -140,6 +140,10 @@ def eval_sdxl():
     @TinyJit
     def clip_step(tokens:Tensor, images:Tensor):
       return clip_enc.get_clip_score(tokens, images).realize()
+    def load_incp_img(im:Image.Image) -> Tensor:
+      x = Tensor(np.array(im)).cast(dtypes.float16).div(255.0)
+      if x.ndim == 2: x = x.unsqueeze(-1).expand(*x.shape, 3)
+      return x.permute(2,0,1).interpolate((299,299), mode='linear')
 
     all_clip_scores = []
     all_incp_acts_1 = []
@@ -153,7 +157,7 @@ def eval_sdxl():
       tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
       images = [clip_enc.prepare_image(im) for im in imgs]
       incp_imgs = [Image.open(f"{DATASET}/calibration/{fn}") for fn in fns] + imgs
-      incp_xs   = [Tensor(np.array(im)).cast(dtypes.float16).div(255.0).permute(2,0,1).interpolate((299,299), mode='linear') for im in incp_imgs]
+      incp_xs   = [load_incp_img(im) for im in incp_imgs]
       with Context(BEAM=EVL_BEAM):
         clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
         incp_act = inception(Tensor.stack(*incp_xs, dim=0).shard(INCP_GPUS, axis=0).realize()).to(INCP_GPUS[0])
@@ -161,8 +165,8 @@ def eval_sdxl():
       pad_slice = slice(None, None if padding == 0 else -padding)
       all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
       incp_act_1, incp_act_2 = incp_act.chunk(2)
-      all_incp_acts_1.append(incp_act_1[pad_slice].squeeze(0).squeeze(0).realize())
-      all_incp_acts_2.append(incp_act_2[pad_slice].squeeze(0).squeeze(0).realize())
+      all_incp_acts_1.append(incp_act_1.squeeze()[pad_slice].realize())
+      all_incp_acts_2.append(incp_act_2.squeeze()[pad_slice].realize())
 
       tracker.update(GBL_EVL_BS - padding)
 
