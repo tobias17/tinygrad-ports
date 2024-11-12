@@ -108,10 +108,10 @@ def clip():
   captions = load_captions()
   all_clip_scores = []
 
-  for dataset_i in tqdm(range(0, len(captions), GBL_GEN_BS)):
-    padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
+  for dataset_i in tqdm(range(0, len(captions), GBL_EVL_BS)):
+    padding = 0 if (dataset_i+GBL_EVL_BS <= len(captions)) else (dataset_i+GBL_EVL_BS) - len(captions)
 
-    ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
+    ds_slice = slice(dataset_i, dataset_i+GBL_EVL_BS)
     texts = captions["caption"].array[ds_slice].tolist()
     imgs  = [Image.open(str(out_folder/f"frame_{dataset_i+img_i}.png")) for img_i in range(len(texts))]
     if padding > 0:
@@ -126,7 +126,7 @@ def clip():
     pad_slice = slice(None, None if padding == 0 else -padding)
     all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
 
-  print(f"\nclip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}\n")
+  print(f"\n\nclip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}\n")
 
 
 def fid():
@@ -143,11 +143,11 @@ def fid():
   all_incp_acts_1 = []
   all_incp_acts_2 = []
 
-  for dataset_i in range(0, len(captions), GBL_GEN_BS):
-    padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
+  for dataset_i in tqdm(range(0, len(captions), GBL_EVL_BS)):
+    padding = 0 if (dataset_i+GBL_EVL_BS <= len(captions)) else (dataset_i+GBL_EVL_BS) - len(captions)
 
-    ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
-    imgs = [Image.open(str(out_folder/f"frame_{dataset_i+img_i}.png")) for img_i in range(GBL_GEN_BS-padding)]
+    ds_slice = slice(dataset_i, dataset_i+GBL_EVL_BS)
+    imgs = [Image.open(str(out_folder/f"frame_{dataset_i+img_i}.png")) for img_i in range(GBL_EVL_BS-padding)]
     fns  = captions["file_name"].array[ds_slice].tolist()
     if padding > 0:
       imgs += [imgs[-1] for _ in range(padding)]
@@ -168,7 +168,7 @@ def fid():
   m2, s2 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_2, dim=0).realize())
   fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
-  print(f"\nfid_score:  {fid_score:.4f}\n")
+  print(f"\n\nfid_score: {fid_score:.4f}\n")
 
 
 if __name__ == "__main__":
@@ -176,4 +176,14 @@ if __name__ == "__main__":
   Tensor.training = False
   Tensor.no_grad = True
 
-  generate()
+  func_map = {
+    "gen": generate,
+    "clip": clip,
+    "fid": fid,
+  }
+  import argparse
+  parser = argparse.ArgumentParser()
+  parser.add_argument("action", type=str, choices=list(func_map.keys()))
+  args = parser.parse_args()
+
+  func_map[args.action]()
