@@ -2,7 +2,7 @@ import time, os
 start = time.perf_counter()
 from pathlib import Path
 import numpy as np
-from tinygrad import Tensor, Device, dtypes, GlobalCounters, TinyJit
+from tinygrad import Tensor, Device, dtypes, TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, torch_load
 from tinygrad.helpers import getenv, fetch, Context, BEAM, tqdm
 def tlog(x): print(f"{x:25s}  @ {time.perf_counter()-start:5.2f}s")
@@ -15,8 +15,6 @@ if not out_folder.exists():
 import pandas as pd # type: ignore
 from PIL import Image
 from examples.sdxl import SDXL, DPMPP2MSampler, configs, SplitVanillaCFG # type: ignore
-# from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
-# from extra.models.inception import FidInceptionV3, compute_mu_and_sigma, calculate_frechet_distance # type: ignore
 GPUS       = tuple(f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 6)))
 CLIP_GPU   = GPUS[0]
 INCP_GPUS  = GPUS if len(GPUS) == 1 else tuple(GPUS[1:])
@@ -35,6 +33,10 @@ LAT_SCALE  = 8
 LAT_SIZE   = IMG_SIZE // LAT_SCALE
 assert LAT_SIZE * LAT_SCALE == IMG_SIZE
 
+def load_captions():
+  return pd.read_csv(f"{DATASET}/captions.tsv", sep='\t', header=0)
+
+
 def generate():
   # Configure Models and Load Weights
   mdl = SDXL(configs["SDXL_Base"])
@@ -44,7 +46,7 @@ def generate():
     if k.startswith("model.") or k.startswith("first_stage_model.") or k == "sigmas":
       w.replace(w.cast(dtypes.float16).shard(GPUS, axis=None)).realize()
 
-  captions = pd.read_csv(f"{DATASET}/captions.tsv", sep='\t', header=0)
+  captions = load_captions()
   sampler  = DPMPP2MSampler(CFG_SCALE, guider_cls=SplitVanillaCFG)
 
   @TinyJit
@@ -73,6 +75,7 @@ def generate():
     return pil_im, pt
 
   print("\nFull Run")
+  st = time.perf_counter()
   for dataset_i in range(0, len(captions), GBL_GEN_BS):
     padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
 
@@ -90,60 +93,82 @@ def generate():
     st = gt
 
 
-# def evaluate():
-#   print("\nEvaluating")
+def clip():
+  from extra.models.clip import OpenClipEncoder, clip_configs, Tokenizer # type: ignore
+  clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
+  tokenizer = Tokenizer.ClipTokenizer()
+  url = "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
+  load_state_dict(clip_enc, torch_load(str(fetch(url, "CLIP-ViT-H-14-laion2B-s32B-b79K.bin"))), strict=False)
+  for w in get_parameters(clip_enc): w.replace(w.cast(dtypes.float16).to(CLIP_GPU)).realize()
 
-#   # Load Evaluation Models
-#   tokenizer = Tokenizer.ClipTokenizer()
-#   clip_enc  = OpenClipEncoder(**clip_configs["ViT-H-14"])
-#   url = "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
-#   load_state_dict(clip_enc, torch_load(str(fetch(url, "CLIP-ViT-H-14-laion2B-s32B-b79K.bin"))), strict=False)
-#   for w in get_parameters(clip_enc): w.replace(w.cast(dtypes.float16).to(CLIP_GPU)).realize()
-#   inception = FidInceptionV3().load_from_pretrained()
-#   for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).shard(INCP_GPUS)).realize()
+  @TinyJit
+  def clip_step(tokens:Tensor, images:Tensor):
+    return clip_enc.get_clip_score(tokens, images).realize()
 
-#   @TinyJit
-#   def clip_step(tokens:Tensor, images:Tensor):
-#     return clip_enc.get_clip_score(tokens, images).realize()
-#   def load_incp_img(im:Image.Image) -> Tensor:
-#     x = Tensor(np.array(im)).cast(dtypes.float16).div(255.0)
-#     if x.ndim == 2: x = x.unsqueeze(-1).expand(*x.shape, 3)
-#     return x.permute(2,0,1).interpolate((299,299), mode='linear')
+  captions = load_captions()
+  all_clip_scores = []
 
-#   all_clip_scores = []
-#   all_incp_acts_1 = []
-#   all_incp_acts_2 = []
+  for dataset_i in tqdm(range(0, len(captions), GBL_GEN_BS)):
+    padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
 
-#   tracker = tqdm(total=len(captions))
-#   while len(gens.imgs) > 0:
-#     imgs, texts, fns, padding = gens.slice_batch(GBL_EVL_BS)
+    ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
+    texts = captions["caption"].array[ds_slice].tolist()
+    imgs  = [Image.open(str(out_folder/f"frame_{dataset_i+img_i}.png")) for img_i in range(len(texts))]
+    if padding > 0:
+      texts += [""       for _ in range(padding)]
+      imgs  += [imgs[-1] for _ in range(padding)]
 
-#     # Evaluate Images
-#     tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
-#     images = [clip_enc.prepare_image(im) for im in imgs]
-#     incp_imgs = [Image.open(f"{DATASET}/calibration/{fn}") for fn in fns] + imgs
-#     incp_xs   = [load_incp_img(im) for im in incp_imgs]
-#     with Context(BEAM=EVL_BEAM):
-#       clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
-#       incp_act = inception(Tensor.stack(*incp_xs, dim=0).shard(INCP_GPUS, axis=0).realize()).to(INCP_GPUS[0])
+    tokens = [Tensor(tokenizer.encode(text, pad_with_zeros=True), dtype=dtypes.int64, device=CLIP_GPU) for text in texts]
+    images = [clip_enc.prepare_image(im) for im in imgs]
+    with Context(BEAM=EVL_BEAM):
+      clip_scores = clip_step(Tensor.stack(*tokens, dim=0).realize(), Tensor.stack(*images, dim=0).realize())
 
-#     pad_slice = slice(None, None if padding == 0 else -padding)
-#     all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
-#     incp_act_1, incp_act_2 = incp_act.chunk(2)
-#     all_incp_acts_1.append(incp_act_1.squeeze()[pad_slice].realize())
-#     all_incp_acts_2.append(incp_act_2.squeeze()[pad_slice].realize())
+    pad_slice = slice(None, None if padding == 0 else -padding)
+    all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
 
-#     tracker.update(GBL_EVL_BS - padding)
+  print(f"\nclip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}\n")
 
-#   # Final Score Computation
-#   m1, s1 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_1, dim=0).realize())
-#   m2, s2 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_2, dim=0).realize())
-#   fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
-#   timings.append(("Evaluate", time.perf_counter() - eval_start))
+def fid():
+  from extra.models.inception import FidInceptionV3, compute_mu_and_sigma, calculate_frechet_distance # type: ignore
+  inception = FidInceptionV3().load_from_pretrained()
+  for w in get_parameters(inception): w.replace(w.cast(dtypes.float16).shard(INCP_GPUS)).realize()
 
-#   print(f"\n clip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}")
-#   print(f" fid_score:  {fid_score:.4f}")
+  def load_incp_img(im:Image.Image) -> Tensor:
+    x = Tensor(np.array(im)).cast(dtypes.float16).div(255.0)
+    if x.ndim == 2: x = x.unsqueeze(-1).expand(*x.shape, 3)
+    return x.permute(2,0,1).interpolate((299,299), mode='linear')
+
+  captions = load_captions()
+  all_incp_acts_1 = []
+  all_incp_acts_2 = []
+
+  for dataset_i in range(0, len(captions), GBL_GEN_BS):
+    padding = 0 if (dataset_i+GBL_GEN_BS <= len(captions)) else (dataset_i+GBL_GEN_BS) - len(captions)
+
+    ds_slice = slice(dataset_i, dataset_i+GBL_GEN_BS)
+    imgs = [Image.open(str(out_folder/f"frame_{dataset_i+img_i}.png")) for img_i in range(GBL_GEN_BS-padding)]
+    fns  = captions["file_name"].array[ds_slice].tolist()
+    if padding > 0:
+      imgs += [imgs[-1] for _ in range(padding)]
+      fns  += [fns [-1] for _ in range(padding)]
+
+    incp_imgs = [Image.open(f"{DATASET}/calibration/{fn}") for fn in fns] + imgs
+    incp_xs   = [load_incp_img(im) for im in incp_imgs]
+    with Context(BEAM=EVL_BEAM):
+      incp_act = inception(Tensor.stack(*incp_xs, dim=0).shard(INCP_GPUS, axis=0).realize()).to(INCP_GPUS[0])
+
+    pad_slice = slice(None, None if padding == 0 else -padding)
+    incp_act_1, incp_act_2 = incp_act.chunk(2)
+    all_incp_acts_1.append(incp_act_1.squeeze()[pad_slice].realize())
+    all_incp_acts_2.append(incp_act_2.squeeze()[pad_slice].realize())
+
+  # Final Score Computation
+  m1, s1 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_1, dim=0).realize())
+  m2, s2 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_2, dim=0).realize())
+  fid_score = calculate_frechet_distance(m1, s1, m2, s2)
+
+  print(f"\nfid_score:  {fid_score:.4f}\n")
 
 
 if __name__ == "__main__":
