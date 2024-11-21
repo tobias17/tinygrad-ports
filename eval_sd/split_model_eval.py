@@ -61,7 +61,7 @@ def generate():
     return x.realize()
 
   def gen_batch(texts):
-    c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE)
+    c, uc = mdl.create_conditioning(texts, IMG_SIZE, IMG_SIZE, neg_prompt="normal quality, low quality, worst quality, low res, blurry, nsfw, nude")
     for t in  c.values(): t.shard_(GPUS, axis=0)
     for t in uc.values(): t.shard_(GPUS, axis=0)
     randn = Tensor.randn(GBL_GEN_BS, 4, LAT_SIZE, LAT_SIZE).shard(GPUS, axis=0)
@@ -126,7 +126,7 @@ def clip():
     pad_slice = slice(None, None if padding == 0 else -padding)
     all_clip_scores += (clip_scores * Tensor.eye(GBL_EVL_BS, device=CLIP_GPU)).sum(axis=-1)[pad_slice].tolist()
 
-  print(f"\n\nclip_score: {sum(all_clip_scores) / len(all_clip_scores):.5f}\n")
+  print(f"\n\nclip_score: {100.0 * sum(all_clip_scores) / len(all_clip_scores):.4f}\n")
 
 
 def fid():
@@ -168,7 +168,7 @@ def fid():
   m2, s2 = compute_mu_and_sigma(Tensor.cat(*all_incp_acts_2, dim=0).realize())
   fid_score = calculate_frechet_distance(m1, s1, m2, s2)
 
-  print(f"\n\nfid_score: {fid_score:.4f}\n")
+  print(f"\n\nfid_score: {fid_score:.3f}\n")
 
 
 if __name__ == "__main__":
