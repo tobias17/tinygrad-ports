@@ -1,11 +1,13 @@
 from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler
 import torch
 from PIL import Image
+import numpy as np
 
 GUIDANCE = 8.0
 STEPS = 20
 
 def main():
+  torch.manual_seed(42)
   assert torch.cuda.is_available(), "cuda was not available"
 
   model_id = "stabilityai/stable-diffusion-xl-base-1.0"
@@ -46,7 +48,9 @@ def main():
     print(f"pos_pooled_shape: {pos_pooled_embeds.shape}")
     print(f"neg_pooled_shape: {neg_pooled_embeds.shape}")
 
-    latents_input = torch.randn(1, 4, 128, 128).half().cuda()
+    torch.manual_seed(42)
+    noise = torch.randn(1, 4, 128, 128).half().cuda()
+    np.save("out_noise.npy", noise.cpu().numpy())
 
     generated: torch.Tensor = pipe(
       prompt_embeds=pos_prompt_embeds,
@@ -56,11 +60,11 @@ def main():
       guidance_scale=GUIDANCE,
       num_inference_steps=STEPS,
       output_type="pt",
-      latents=latents_input,
+      latents=noise,
     ).images
 
     img = Image.fromarray(generated.squeeze(0).permute(1, 2, 0).mul(255.0).to(torch.uint8).detach().cpu().numpy())
-    img.show()
+    img.save("out_img_pytorch.png")
 
 if __name__ == "__main__":
   main()
