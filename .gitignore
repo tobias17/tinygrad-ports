@@ -7,3 +7,5 @@ weights/*
 **/archive
 
 eval_sd/COCO
+
+ground_up/gen.png
