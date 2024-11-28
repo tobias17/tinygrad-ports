@@ -53,6 +53,10 @@ def main():
     np.save("out_noise.npy", noise.cpu().numpy())
 
     generated: torch.Tensor = pipe(
+      # prompt=pos_prompt,
+      # prompt_2=pos_prompt,
+      # negative_prompt=neg_prompt,
+      # negative_prompt_2=neg_prompt,
       prompt_embeds=pos_prompt_embeds,
       negative_prompt_embeds=neg_prompt_embeds,
       pooled_prompt_embeds=pos_pooled_embeds,
