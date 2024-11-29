@@ -3,7 +3,7 @@ from tinygrad.helpers import fetch, tqdm
 from tinygrad.nn import Conv2d
 from tinygrad.nn.state import load_state_dict, safe_load
 from examples.sdxl import FirstStage
-from local_unet import UNetModel
+from local_unet import UNetModel, log_difference
 import numpy as np
 from PIL import Image
 
@@ -156,10 +156,13 @@ def main():
   load_state_dict(model, safe_load(str(fetch(weights_url, 'sd_xl_base_1.0.safetensors'))), strict=False)
 
   timesteps = list(range(1, 1000, 50))[::-1]
-  for i, t in tqdm(enumerate(timesteps)):
+  for i, t in enumerate(timesteps):
+    print(f"Running step {i}")
     latent_model_input = scheduler.scale_model_input(Tensor.cat(latents, latents), i)
 
     noise_pred = model.model.diffusion_model(latent_model_input, Tensor(t).expand(2), prompt_embeds, add_text_embeds, add_time_ids).realize()
+    log_difference("noise_p", noise_pred, Tensor(np.load("../compare/stages/00/noise_pred.npy")))
+    assert False
     noise_pred_u, noise_pred_c = noise_pred.chunk(2)
     noise_pred = noise_pred_u + GUIDANCE_SCALE * (noise_pred_c - noise_pred_u)
 

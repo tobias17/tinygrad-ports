@@ -4,6 +4,11 @@ from tinygrad.device import is_dtype_supported
 from typing import Optional, Union, List, Any, Tuple
 import math
 
+import numpy as np
+def log_difference(name:str, orig:Tensor, comp:Tensor) -> None:
+  delta = (orig - comp).abs()
+  print(f"{name}: mean(delta)={delta.mean().numpy():.4f}, max(delta)={delta.max().numpy():.4f}, mean(orig)={orig.abs().mean().numpy():.4f}, mean(comp)={comp.abs().mean().numpy():.4f}")
+
 # https://github.com/Stability-AI/generative-models/blob/fbdc58cab9f4ee2be7a5e1f2e2787ecd9311942f/sgm/modules/diffusionmodules/util.py#L207
 def timestep_embedding(timesteps:Tensor, dim:int, max_period=10000):
   half = dim // 2
@@ -225,11 +230,15 @@ class UNetModel:
   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, add_text_embeds:Tensor, add_time_ids:Tensor) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch)
     emb   = t_emb.sequential(self.time_embed)
+    ROOT = "../compare/stages/00"
+    log_difference("pre_emb", emb, Tensor(np.load(f"{ROOT}/pre_emb.npy")))
 
     time_embeds = timestep_embedding(add_time_ids.flatten(), 256)
     time_embeds = time_embeds.reshape(x.shape[0], -1)
     add_emb = Tensor.cat(add_text_embeds, time_embeds, dim=-1).sequential(self.label_emb[0])
+    log_difference("add_emb", add_emb, Tensor(np.load(f"{ROOT}/aug_emb.npy")))
     emb = emb + add_emb
+    log_difference("pst_emb", emb, Tensor(np.load(f"{ROOT}/post_emb.npy")))
 
     if is_dtype_supported(dtypes.float16):
       emb = emb.cast(dtypes.float16)
