@@ -252,16 +252,21 @@ class UNetModel:
       return x
 
     saved_inputs = []
+    # log_difference("input_x", x, Tensor(np.load(f"{ROOT}/input_x.npy")))
+    x = Tensor(np.load(f"{ROOT}/input_x.npy")).realize()
     for b in self.input_blocks:
       for bb in b:
         x = run(x, bb)
       saved_inputs.append(x)
+    log_difference("dn_blck", x, Tensor(np.load(f"{ROOT}/post_down_sample.npy")))
     for bb in self.middle_block:
       x = run(x, bb)
+    log_difference("md_blck", x, Tensor(np.load(f"{ROOT}/post_mid_sample.npy")))
     for b in self.output_blocks:
       x = x.cat(saved_inputs.pop(), dim=1)
       for bb in b:
         x = run(x, bb)
+    log_difference("up_blck", x, Tensor(np.load(f"{ROOT}/post_up_sample.npy")))
     return x.sequential(self.out)
 
 
