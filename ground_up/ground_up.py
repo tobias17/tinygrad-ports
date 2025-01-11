@@ -70,16 +70,19 @@ class LegacyDDPMDiscretization:
 class EulerDiscreteScheduler:
   inference_steps: int = -1
 
-  def __init__(self, num_timesteps:int=1000, beta_start:float=0.0001, beta_end:float=0.02, beta_schedule:str="scaled_linear"):
+  def __init__(self, num_timesteps:int=1000, beta_start:float=0.00085, beta_end:float=0.012, beta_schedule:str="scaled_linear"):
     self.num_timesteps = num_timesteps
 
     if beta_schedule == "scaled_linear":
-      self.betas = Tensor.linspace(beta_start**0.5, beta_end**0.5, num_timesteps).square()
+      self.betas = Tensor.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, dtype=dtypes.float32).square()
+      y = self.betas.numpy()
     else:
       raise NotImplementedError(f"Beta schedule '{beta_schedule}' not implemented for {self.__class__.__name__}")
     
     self.alphas         = 1.0 - self.betas
-    self.alphas_cumprod = self.alphas.cumprod(axis=0)
+    x = self.alphas.numpy()
+    z = np.cumprod(self.alphas.numpy(), axis=0)
+    self.alphas_cumprod = Tensor(z)
 
     # FIXME: try other way around
     self.all_timesteps = Tensor(np.linspace(0, num_timesteps - 1, num_timesteps, dtype=np.float32)[::-1].copy())
@@ -111,16 +114,26 @@ class EulerDiscreteScheduler:
 
 
   def step(self, sample:Tensor, i:int, model_output:Tensor, pred_type:str="epsilon") -> Tensor:
+    print("\n")
     sigma = self.sigmas[i]
+    print(f"sample: {sample.mean().numpy()}")
+    print(f"sigma: {sigma.mean().numpy()}")
+    print(f"model_output: {model_output.mean().numpy()}")
 
     if pred_type == "epsilon":
       pred = sample - sigma * model_output
+      print(f"pred: {pred.mean().numpy()}")
     else:
       raise NotImplementedError(f"{self.__class__.__name__} does not support pred_type '{pred_type}'")
 
     derivative = (sample - pred) / sigma
+    print(f"derivative: {derivative.mean().numpy()}")
     dt = self.sigmas[i + 1] - sigma
+    print(f"dt: {dt.mean().numpy()}")
     prev = sample + derivative * dt
+    print(f"prev: {prev.mean().numpy()}")
+
+    print("\n")
 
     return prev
 
@@ -160,13 +173,14 @@ def main():
     print(f"Running step {i}")
     latent_model_input = scheduler.scale_model_input(Tensor.cat(latents, latents), i)
 
-    noise_pred = model.model.diffusion_model(latent_model_input, Tensor(t).expand(2), prompt_embeds, add_text_embeds, add_time_ids).realize()
-    log_difference("noise_p", noise_pred, Tensor(np.load("../compare/stages/00/noise_pred.npy")))
-    assert False
+    noise_pred = model.model.diffusion_model(latent_model_input, Tensor(t).expand(2), prompt_embeds, add_text_embeds, add_time_ids, i).realize()
+    log_difference("noise_p", noise_pred, Tensor(np.load(f"../compare/stages/{i:02d}/noise_pred.npy")))
     noise_pred_u, noise_pred_c = noise_pred.chunk(2)
     noise_pred = noise_pred_u + GUIDANCE_SCALE * (noise_pred_c - noise_pred_u)
 
     latents = scheduler.step(latents, i, noise_pred).realize()
+    log_difference("latents", latents, Tensor(np.load(f"../compare/stages/{i:02d}/end_latents.npy")))
+    import sys; sys.exit(0)
   
   x = model.decode(latents)
   x = (x + 1.0) / 2.0

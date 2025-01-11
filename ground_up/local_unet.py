@@ -227,10 +227,10 @@ class UNetModel:
       Conv2d(model_ch, out_ch, 3, padding=1),
     ]
 
-  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, add_text_embeds:Tensor, add_time_ids:Tensor) -> Tensor:
+  def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, add_text_embeds:Tensor, add_time_ids:Tensor, idx=-1) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch)
     emb   = t_emb.sequential(self.time_embed)
-    ROOT = "../compare/stages/00"
+    ROOT  = f"../compare/stages/{idx:02d}"
     log_difference("pre_emb", emb, Tensor(np.load(f"{ROOT}/pre_emb.npy")))
 
     time_embeds = timestep_embedding(add_time_ids.flatten(), 256)
@@ -252,8 +252,8 @@ class UNetModel:
       return x
 
     saved_inputs = []
-    # log_difference("input_x", x, Tensor(np.load(f"{ROOT}/input_x.npy")))
     x = Tensor(np.load(f"{ROOT}/input_x.npy")).realize()
+    log_difference("input_x", x, Tensor(np.load(f"{ROOT}/input_x.npy")))
     for b in self.input_blocks:
       for bb in b:
         x = run(x, bb)
