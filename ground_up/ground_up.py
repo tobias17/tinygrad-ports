@@ -114,26 +114,16 @@ class EulerDiscreteScheduler:
 
 
   def step(self, sample:Tensor, i:int, model_output:Tensor, pred_type:str="epsilon") -> Tensor:
-    print("\n")
     sigma = self.sigmas[i]
-    print(f"sample: {sample.mean().numpy()}")
-    print(f"sigma: {sigma.mean().numpy()}")
-    print(f"model_output: {model_output.mean().numpy()}")
 
     if pred_type == "epsilon":
       pred = sample - sigma * model_output
-      print(f"pred: {pred.mean().numpy()}")
     else:
       raise NotImplementedError(f"{self.__class__.__name__} does not support pred_type '{pred_type}'")
 
     derivative = (sample - pred) / sigma
-    print(f"derivative: {derivative.mean().numpy()}")
     dt = self.sigmas[i + 1] - sigma
-    print(f"dt: {dt.mean().numpy()}")
     prev = sample + derivative * dt
-    print(f"prev: {prev.mean().numpy()}")
-
-    print("\n")
 
     return prev
 
@@ -180,7 +170,7 @@ def main():
 
     latents = scheduler.step(latents, i, noise_pred).realize()
     log_difference("latents", latents, Tensor(np.load(f"../compare/stages/{i:02d}/end_latents.npy")))
-    import sys; sys.exit(0)
+    print()
   
   x = model.decode(latents)
   x = (x + 1.0) / 2.0

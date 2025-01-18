@@ -231,14 +231,11 @@ class UNetModel:
     t_emb = timestep_embedding(tms, self.model_ch)
     emb   = t_emb.sequential(self.time_embed)
     ROOT  = f"../compare/stages/{idx:02d}"
-    log_difference("pre_emb", emb, Tensor(np.load(f"{ROOT}/pre_emb.npy")))
 
     time_embeds = timestep_embedding(add_time_ids.flatten(), 256)
     time_embeds = time_embeds.reshape(x.shape[0], -1)
     add_emb = Tensor.cat(add_text_embeds, time_embeds, dim=-1).sequential(self.label_emb[0])
-    log_difference("add_emb", add_emb, Tensor(np.load(f"{ROOT}/aug_emb.npy")))
     emb = emb + add_emb
-    log_difference("pst_emb", emb, Tensor(np.load(f"{ROOT}/post_emb.npy")))
 
     if is_dtype_supported(dtypes.float16):
       emb = emb.cast(dtypes.float16)
@@ -252,21 +249,16 @@ class UNetModel:
       return x
 
     saved_inputs = []
-    x = Tensor(np.load(f"{ROOT}/input_x.npy")).realize()
-    log_difference("input_x", x, Tensor(np.load(f"{ROOT}/input_x.npy")))
     for b in self.input_blocks:
       for bb in b:
         x = run(x, bb)
       saved_inputs.append(x)
-    log_difference("dn_blck", x, Tensor(np.load(f"{ROOT}/post_down_sample.npy")))
     for bb in self.middle_block:
       x = run(x, bb)
-    log_difference("md_blck", x, Tensor(np.load(f"{ROOT}/post_mid_sample.npy")))
     for b in self.output_blocks:
       x = x.cat(saved_inputs.pop(), dim=1)
       for bb in b:
         x = run(x, bb)
-    log_difference("up_blck", x, Tensor(np.load(f"{ROOT}/post_up_sample.npy")))
     return x.sequential(self.out)
 
 
