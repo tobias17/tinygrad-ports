@@ -2,10 +2,13 @@ from tinygrad import Tensor, dtypes
 from tinygrad.helpers import fetch, tqdm
 from tinygrad.nn import Conv2d
 from tinygrad.nn.state import load_state_dict, safe_load
+from local_clip import Embedder, FrozenClosedClipEmbedder, FrozenOpenClipEmbedder, Tokenizer
 from examples.sdxl import FirstStage
-from local_unet import UNetModel, log_difference
+from local_unet import UNetModel, log_difference, timestep_embedding
 import numpy as np
 from PIL import Image
+from typing import List, Dict, Union, Tuple
+from dataclasses import dataclass
 
 
 
@@ -33,6 +36,69 @@ def cumprod(self, axis:int=0) -> Tensor:
   return self._split_cumalu(axis, Ops.MUL)
 Tensor.cumprod = cumprod # type: ignore
 #######################################
+
+
+class ConcatTimestepEmbedderND(Embedder):
+  def __init__(self, outdim:int, input_key:str):
+    self.outdim = outdim
+    self.input_key = input_key
+
+  def __call__(self, x:Tensor) -> Dict[str,Tensor]:
+    assert isinstance(x, Tensor) and len(x.shape) == 2
+    emb = timestep_embedding(x.flatten(), self.outdim)
+    emb = emb.reshape((x.shape[0],-1))
+    return { "add_text_embed": emb }
+
+
+
+class SDXLConditioner:
+  CAT_DIMS = { "prompt_embed":-1, "add_text_embed":1 }
+  embedders: List[Embedder]
+  
+  def __init__(self, concat_embedders:List[str]):
+    self.embedders = [
+      FrozenClosedClipEmbedder(ret_layer_idx=11),
+      FrozenOpenClipEmbedder(dims=1280, n_heads=20, layers=32, return_pooled=True),
+      *[ConcatTimestepEmbedderND(256, key) for key in concat_embedders],
+    ]
+    self.tokenizer = Tokenizer.ClipTokenizer()
+
+  def tokenize(self, texts:Union[str,List[str]]) -> Tensor:
+    if isinstance(texts, str): texts = [texts]
+    assert isinstance(texts, (list,tuple)), f"expected list of strings, got {type(texts).__name__}"
+    return Tensor.cat(*[Tensor(self.tokenizer.encode(text)) for text in texts], dim=0)
+
+  def embed(self, batch:Dict[str,Tensor]) -> Dict[str,Tensor]:
+    ret_val: Dict[str,Tensor] = {}
+
+    for embedder in self.embedders:
+      emb_out = embedder(batch[embedder.input_key])
+      for out_key, out_value in emb_out.items():
+        if out_key not in ret_val:
+          ret_val[out_key] = out_value
+        else:
+          ret_val[out_key] = Tensor.cat(ret_val[out_key], out_value, dim=self.CAT_DIMS[out_key])
+    
+    return ret_val
+
+
+  def __call__(self, pos_tokens:Tensor, img_width:int, img_height:int, aesthetic_score:float=5.0) -> Tuple[Dict[str,Tensor],Dict[str,Tensor]]:
+    N = pos_tokens.shape[0]
+    batch_c : Dict = {
+      "tokens": pos_tokens,
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+    }
+    batch_uc: Dict = {
+      "tokens": Tensor.zeros_like(pos_tokens),
+      "original_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "crop_coords_top_left": Tensor([0,0]).repeat(N,1),
+      "target_size_as_tuple": Tensor([img_height,img_width]).repeat(N,1),
+      "aesthetic_score": Tensor([aesthetic_score]).repeat(N,1),
+    }
+    return self.embed(batch_c), self.embed(batch_uc)
 
 
 
@@ -130,7 +196,8 @@ class EulerDiscreteScheduler:
 class SDXL:
   def __init__(self):
     self.model = DiffusionModel(**{"adm_in_ch": 2816, "in_ch": 4, "out_ch": 4, "model_ch": 320, "attention_resolutions": [4, 2], "num_res_blocks": 2, "channel_mult": [1, 2, 4], "d_head": 64, "transformer_depth": [1, 2, 10], "ctx_dim": 2048, "use_linear": True})
-    self.first_stage_model = FirstStageModel(**{"ch": 128, "in_ch": 3, "out_ch": 3, "z_ch": 4, "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2, "resolution": 256})
+    self.first_stage_model = FirstStageModel(ch=128, in_ch=3, out_ch=3, z_ch=4, ch_mult=[1, 2, 4, 4], num_res_blocks=2, resolution=256)
+    self.conditioner = SDXLConditioner(["original_size_as_tuple","crop_coords_top_left","target_size_as_tuple"])
     self.discretization = LegacyDDPMDiscretization()
     self.sigmas = self.discretization(1000, flip=True)
 

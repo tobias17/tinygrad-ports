@@ -230,7 +230,6 @@ class UNetModel:
   def __call__(self, x:Tensor, tms:Tensor, ctx:Tensor, add_text_embeds:Tensor, add_time_ids:Tensor, idx=-1) -> Tensor:
     t_emb = timestep_embedding(tms, self.model_ch)
     emb   = t_emb.sequential(self.time_embed)
-    ROOT  = f"../compare/stages/{idx:02d}"
 
     time_embeds = timestep_embedding(add_time_ids.flatten(), 256)
     time_embeds = time_embeds.reshape(x.shape[0], -1)
